@@ -29,9 +29,26 @@
 #include "../../util/profiling_clock.h"
 #include "../../util/string/format.h"
 #include "../../util/tasks/async_dependency_tracker.h"
+#include "../../util/tasks/threaded_task.h"
 #include "../voxel_data_block_enter_info.h"
 #include "../voxel_save_completion_tracker.h"
 #include "voxel_terrain_multiplayer_synchronizer.h"
+#include <mutex>
+#include <array>
+#include <condition_variable>
+#include <unordered_map>
+#include <unordered_set>
+#include <queue>
+#include <optional>
+#include <cstdio>
+#include <cstdarg>
+#include <memory>
+#include <iostream>
+#include <fstream>
+#include "../../util/dstack.h"
+#include "../../util/rgblight.h"
+#include "../../util/godot/classes/file_access.h"
+#include "../../util/godot/file_utils.h"
 
 #ifdef TOOLS_ENABLED
 #include "../../meshers/transvoxel/voxel_mesher_transvoxel.h"
@@ -42,6 +59,224 @@
 #endif
 
 namespace zylann::voxel {
+
+struct CubicAreaInfo {
+	int edge_size; // In data blocks
+	int mesh_block_size_factor;
+	unsigned int anchor_buffer_index;
+
+	inline bool is_valid() const {
+		return edge_size != 0;
+	}
+};
+
+CubicAreaInfo get_cubic_area_info_from_size(unsigned int size) {
+	// Determine size of the cube of blocks
+	int edge_size;
+	int mesh_block_size_factor;
+	switch (size) {
+		case 3 * 3 * 3:
+			edge_size = 3;
+			mesh_block_size_factor = 1;
+			break;
+		case 4 * 4 * 4:
+			edge_size = 4;
+			mesh_block_size_factor = 2;
+			break;
+		default:
+			ZN_PRINT_ERROR("Unsupported block count");
+			return CubicAreaInfo{ 0, 0, 0 };
+	}
+
+	// Pick anchor block, usually within the central part of the cube (that block must be valid)
+	const unsigned int anchor_buffer_index = edge_size * edge_size + edge_size + 1;
+
+	return { edge_size, mesh_block_size_factor, anchor_buffer_index };
+}
+
+// copied from mesh_block_task.cpp
+void copy_block_and_neighbors(
+		Span<std::shared_ptr<VoxelBuffer>> blocks,
+		VoxelBuffer &dst,
+		int min_padding,
+		int max_padding,
+		int channels_mask,
+		Ref<VoxelGenerator> generator,
+		const VoxelData &voxel_data,
+		uint8_t lod_index,
+		Vector3i mesh_block_pos,
+		StdVector<Box3i> *out_boxes_to_generate,
+		Vector3i *out_origin_in_voxels
+) {
+	ZN_DSTACK();
+	ZN_PROFILE_SCOPE();
+
+	// Extract wanted channels in a list
+	const SmallVector<uint8_t, VoxelBuffer::MAX_CHANNELS> channels = VoxelBuffer::mask_to_channels_list(channels_mask);
+
+	// Determine size of the cube of blocks
+	const CubicAreaInfo area_info = get_cubic_area_info_from_size(blocks.size());
+	ERR_FAIL_COND(!area_info.is_valid());
+
+	std::shared_ptr<VoxelBuffer> &central_buffer = blocks[area_info.anchor_buffer_index];
+	ERR_FAIL_COND_MSG(central_buffer == nullptr && generator.is_null(), "Central buffer must be valid");
+	if (central_buffer != nullptr) {
+		ERR_FAIL_COND_MSG(
+				Vector3iUtil::all_members_equal(central_buffer->get_size()) == false, "Central buffer must be cubic"
+		);
+	}
+	const int data_block_size = voxel_data.get_block_size();
+	const int mesh_block_size = data_block_size * area_info.mesh_block_size_factor;
+	const int padded_mesh_block_size = mesh_block_size + min_padding + max_padding;
+
+	dst.create(padded_mesh_block_size, padded_mesh_block_size, padded_mesh_block_size);
+
+	// TODO Need to provide format differently, this won't work in full load mode where areas are generated on the fly
+	// for (unsigned int ci = 0; ci < channels.size(); ++ci) {
+	// 	dst.set_channel_depth(ci, central_buffer->get_channel_depth(ci));
+	// }
+	// This is a hack
+	for (unsigned int i = 0; i < blocks.size(); ++i) {
+		const std::shared_ptr<VoxelBuffer> &buffer = blocks[i];
+		if (buffer != nullptr) {
+			// Initialize channel depths from the first non-null block found
+			dst.copy_format(*buffer);
+			break;
+		}
+	}
+
+	const Box3i bounds_in_voxels_lod0 = voxel_data.get_bounds();
+	const Box3i bounds_in_voxels(bounds_in_voxels_lod0.position >> lod_index, bounds_in_voxels_lod0.size >> lod_index);
+
+	// TODO In terrains that only work with caches, we should never consider generating voxels from here.
+	// This is the case of VoxelTerrain, which is now doing unnecessary box subtraction calculations...
+
+	const Vector3i min_pos = -Vector3iUtil::create(min_padding);
+	const Vector3i max_pos = Vector3iUtil::create(mesh_block_size + max_padding);
+
+	const Vector3i origin_in_voxels_without_padding =
+			mesh_block_pos * (area_info.mesh_block_size_factor * data_block_size);
+	const Vector3i origin_in_voxels = origin_in_voxels_without_padding - Vector3iUtil::create(min_padding);
+	const Vector3i origin_in_voxels_lod0 = origin_in_voxels << lod_index;
+
+	// These boxes are initially relative to the minimum corner of the minimum chunk.
+	// TODO Candidate for temp allocator (or SmallVector?)
+	StdVector<Box3i> boxes_to_generate;
+	const Box3i mesh_data_box = Box3i::from_min_max(min_pos, max_pos);
+	if (contains(blocks.to_const(), std::shared_ptr<VoxelBuffer>())) {
+		const Box3i bounds_local(bounds_in_voxels.position - origin_in_voxels_without_padding, bounds_in_voxels.size);
+		const Box3i box = mesh_data_box.clipped(bounds_local); // Prevent generation outside fixed bounds
+		if (!box.is_empty()) {
+			boxes_to_generate.push_back(box);
+		}
+	}
+
+	{
+		// TODO The following logic might as well be simplified and moved to VoxelData.
+		// We are just sampling or generating data in a given area.
+
+		const Vector3i data_block_pos0 = mesh_block_pos * area_info.mesh_block_size_factor;
+		SpatialLock3D::Read srlock(
+				voxel_data.get_spatial_lock(lod_index),
+				BoxBounds3i(
+						data_block_pos0 - Vector3i(1, 1, 1), data_block_pos0 + Vector3iUtil::create(area_info.edge_size)
+				)
+		);
+
+		// Using ZXY as convention to reconstruct positions with thread locking consistency
+		unsigned int block_index = 0;
+		for (int z = -1; z < area_info.edge_size - 1; ++z) {
+			for (int x = -1; x < area_info.edge_size - 1; ++x) {
+				for (int y = -1; y < area_info.edge_size - 1; ++y) {
+					const Vector3i offset = data_block_size * Vector3i(x, y, z);
+					const std::shared_ptr<VoxelBuffer> &src = blocks[block_index];
+					++block_index;
+
+					if (src == nullptr) {
+						continue;
+					}
+
+					const Vector3i src_min = min_pos - offset;
+					const Vector3i src_max = max_pos - offset;
+
+					for (const uint8_t channel_index : channels) {
+						dst.copy_channel_from(*src, src_min, src_max, Vector3i(), channel_index);
+					}
+
+					if (boxes_to_generate.size() > 0) {
+						// Subtract edited box from the area to generate
+						// TODO This approach allows to batch boxes if necessary,
+						// but is it just better to do it anyways for every clipped box?
+						ZN_PROFILE_SCOPE_NAMED("Box subtract");
+						const unsigned int input_count = boxes_to_generate.size();
+						const Box3i block_box =
+								Box3i(offset, Vector3iUtil::create(data_block_size)).clipped(mesh_data_box);
+
+						for (unsigned int box_index = 0; box_index < input_count; ++box_index) {
+							const Box3i box = boxes_to_generate[box_index];
+							// Remainder boxes are added to the end of the list
+							box.difference_to_vec(block_box, boxes_to_generate);
+#ifdef DEBUG_ENABLED
+							// Difference should add boxes to the vector, not remove any
+							CRASH_COND(box_index >= boxes_to_generate.size());
+#endif
+						}
+
+						// Remove input boxes
+						boxes_to_generate.erase(boxes_to_generate.begin(), boxes_to_generate.begin() + input_count);
+					}
+				}
+			}
+		}
+	}
+
+	// Undo padding to go back to proper buffer coordinates
+	for (Box3i &box : boxes_to_generate) {
+		box.position += Vector3iUtil::create(min_padding);
+	}
+
+	if (out_origin_in_voxels != nullptr) {
+		*out_origin_in_voxels = origin_in_voxels_lod0;
+	}
+
+	if (out_boxes_to_generate != nullptr) {
+		// Delegate generation to the caller
+		append_array(*out_boxes_to_generate, boxes_to_generate);
+
+	} else {
+		// Complete data with generated voxels on the CPU
+		ZN_PROFILE_SCOPE_NAMED("Generate");
+		VoxelBuffer generated_voxels(VoxelBuffer::ALLOCATOR_POOL);
+
+#ifdef VOXEL_ENABLE_MODIFIERS
+		const VoxelModifierStack &modifiers = voxel_data.get_modifiers();
+#endif
+
+		for (const Box3i &box : boxes_to_generate) {
+			ZN_PROFILE_SCOPE_NAMED("Box");
+			// print_line(String("size={0}").format(varray(box.size.to_vec3())));
+			generated_voxels.create(box.size);
+			// generated_voxels.set_voxel_f(2.0f, box.size.x / 2, box.size.y / 2, box.size.z / 2,
+			// VoxelBuffer::CHANNEL_SDF);
+			VoxelGenerator::VoxelQueryData q{ generated_voxels,
+											  (box.position << lod_index) + origin_in_voxels_lod0,
+											  lod_index };
+
+			if (generator.is_valid()) {
+				generator->generate_block(q);
+			}
+#ifdef VOXEL_ENABLE_MODIFIERS
+			modifiers.apply(q.voxel_buffer, AABB(q.origin_in_voxels, q.voxel_buffer.get_size() << lod_index));
+#endif
+
+			for (const uint8_t channel_index : channels) {
+				dst.copy_channel_from(
+						generated_voxels, Vector3i(), generated_voxels.get_size(), box.position, channel_index
+				);
+			}
+		}
+	}
+}
 
 VoxelTerrain::VoxelTerrain() {
 	// Note: don't do anything heavy in the constructor.
@@ -1813,6 +2048,561 @@ bool VoxelTerrain::has_data_block(Vector3i position) const {
 	return _data->has_block(position, 0);
 }
 
+constexpr bool ENABLE_MYPRINTF = false;
+void myprintf(const char* format, ...) {
+    if constexpr (ENABLE_MYPRINTF) {
+        va_list args;
+        va_start(args, format);
+        vprintf(format, args);
+        va_end(args);
+    }
+}
+
+struct LightQueueItem {
+    RGBLight light;
+    unsigned int x;
+    unsigned int y;
+    unsigned int z;
+};
+
+struct CompareLight {
+    bool operator()(const LightQueueItem& a, const LightQueueItem& b) const {
+        return a.light.maxComponent() < b.light.maxComponent();
+    }
+};
+
+uint32_t vector3iKey(Vector3i v) {
+    // return 2147483647 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
+    // return 1000000000 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
+    return 1000 * 1000 * (v.x + 1000) + 1000 * (v.y + 1000) + (v.z + 1000);
+}
+
+Vector3i reverseVector3iKey(uint32_t key) {
+    int32_t k = key;
+
+    int x = (k / 1000000) - 1000;
+    int y = ((k % 1000000) / 1000) - 1000;
+    int z = (k % 1000) - 1000;
+
+    return Vector3i(x, y, z);
+}
+
+std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<uint32_t, RGBLight*> *lightMap, std::unordered_map<uint32_t, int8_t> *lightCompressedMap, bool sunlightEnabled) {
+    std::array<RGBLight, 20*20*20> result; // needs to be 20x20 for 2-voxel margins on all sides
+
+    for (int x = 0; x <= 19; ++x) {
+        for (int y = 0; y <= 19; ++y) {
+            for (int z = 0; z <= 19; ++z) {
+                Vector3i oldVoxel{x, y, z};
+                Vector3i newBlockPos{blockPos.x, blockPos.y, blockPos.z};
+                int nx = x;
+                int ny = y;
+                int nz = z;
+                if (nx <= 1) {
+                    nx += 16;
+                    newBlockPos.x--;
+                } else if (nx >= 18) {
+                    nx -= 16;
+                    newBlockPos.x++;
+                }
+                if (ny <= 1) {
+                    ny += 16;
+                    newBlockPos.y--;
+                } else if (ny >= 18) {
+                    ny -= 16;
+                    newBlockPos.y++;
+                }
+                if (nz <= 1) {
+                    nz += 16;
+                    newBlockPos.z--;
+                } else if (nz >= 18) {
+                    nz -= 16;
+                    newBlockPos.z++;
+                }
+
+                uint32_t newBlockKey = vector3iKey(newBlockPos);
+                RGBLight lightValue = sunlightEnabled ? RGBLight{255, 255, 255} : RGBLight{0, 0, 0};
+                if (lightCompressedMap->find(newBlockKey) != lightCompressedMap->end()) {
+                    int8_t lightCompressed = (*lightCompressedMap)[newBlockKey];
+                    RGBLight* lightArray; // may be unset if light is compressed
+
+                    if (lightCompressed == 0) { // light is not compressed
+                        lightArray = (*lightMap)[newBlockKey];
+                    }
+                    
+                    if (lightCompressed == 0) { // light is not compressed
+                        lightValue = lightArray[index3D(nx - 1, ny - 1, nz - 1)]; // -1 accounts for 20x20x20 -> 19x19x19
+                    } else { // light is compressed
+                        lightValue = lightCompressed == 1 ? RGBLight{255, 255, 255} : RGBLight{0, 0, 0};
+                    }
+                }
+
+                uint32_t finalIndex = index3D(oldVoxel.x, oldVoxel.y, oldVoxel.z, 20);
+                result[finalIndex] = lightValue;
+            }
+        }
+    }
+
+    return result;
+}
+
+class LightBlockTask : public IThreadedTask {
+    public:
+
+    std::vector<LightQueueItem> startingLight;
+    bool compressedLight = false; // represents light coming down from everywhere from (0, 16, 0) to (16, 16, 16)
+    Vector3i blockPos;
+    RGBLight* lightData;
+    std::unordered_map<uint32_t, std::mutex> *pendingBlocks;
+    std::unordered_map<uint32_t, RGBLight*> *lightMap;
+    std::unordered_map<uint32_t, int8_t> *lightCompressedMap;
+    std::optional<Vector3i> originBlock; // which block triggered this update (not set for initial updates)
+
+    int mesh_to_data_factor;
+    std::shared_ptr<VoxelData> _data;
+    Ref<VoxelMesher> _mesher;
+    Ref<VoxelGenerator> _generator;
+
+    std::mutex *tempLock;
+    std::vector<LightBlockTask*> *secondPassTasks;
+    std::unordered_set<Vector3i> *blocksToRemesh;
+    std::unordered_map<uint32_t, int16_t> *voxelCompressedCache;
+    std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> *voxelDataCache;
+    int lightDecay;
+    int lightMinimum;
+    
+    void run(ThreadedTaskContext &ctx) {
+        uint32_t blockKey = vector3iKey(blockPos);
+
+        // only one task can operate on a block at once, this will make the thread sleep until the lock is free
+        // TODO: currently crashes
+        // std::lock_guard<std::mutex> lock((*pendingBlocks)[vector3iKey(blockPos)]);
+
+        // completely synchronous execution
+        std::lock_guard<std::mutex> lock(*tempLock);
+
+        int LIGHT_FALLOFF = lightDecay;
+        int LIGHT_MIN = lightMinimum;
+        const int row_size = 18;
+	    const int deck_size = 18 * 18;
+        const Vector3i min{1, 1, 1};
+        const Vector3i max{17, 17, 17};
+        static const uint16_t AIR_ID = 0;
+
+        // copy block data into a buffer if we don't already have it cached
+        std::shared_ptr<uint16_t> voxelDataType;
+        int16_t voxelCompressedType;
+        bool voxelIsCompressed = false;
+        if (voxelCompressedCache->find(blockKey) != voxelCompressedCache->end()) {
+            myprintf("already have");
+            voxelCompressedType = (*voxelCompressedCache)[blockKey];
+            if (voxelCompressedType == -1) {
+                voxelDataType = (*voxelDataCache)[blockKey];
+            }
+            voxelIsCompressed = voxelCompressedType != -1;
+        } else {
+            // get block data for the blocks we need
+            FixedArray<std::shared_ptr<VoxelBuffer>, constants::MAX_BLOCK_COUNT_PER_REQUEST> blocks;
+            const Box3i data_box = Box3i(blockPos * mesh_to_data_factor, Vector3iUtil::create(mesh_to_data_factor)).padded(1);
+            bool dataSuccess = _data->get_blocks_with_voxel_data(data_box, 0, to_span(blocks));
+
+            if (!dataSuccess) {
+                return; // try to avoid crashing
+            }
+
+            uint64_t blocks_count = Vector3iUtil::get_volume_u64(data_box.size);
+
+            VoxelBuffer voxels(VoxelBuffer::ALLOCATOR_POOL);
+            copy_block_and_neighbors(
+                to_span(blocks, blocks_count),
+                voxels, // output VoxelBuffer
+                1, // min padding
+                1, // max padding
+                _mesher->get_used_channels_mask(),
+                _generator,
+                *_data, // all the voxel data stored in the terrain
+                0, // lod_index
+                blockPos,
+                nullptr,
+                nullptr
+            );
+
+            // get the type channel from the fetched voxels (copied from voxel_mesher_blocky.cpp)
+            uint16_t compressedVoxelId;
+            Span<const uint16_t> type_buffer;
+
+            const VoxelBuffer::ChannelId channel = VoxelBuffer::CHANNEL_TYPE;
+            if (voxels.get_channel_compression(channel) == VoxelBuffer::COMPRESSION_UNIFORM) {
+                // All voxels have the same type.
+                Span<const uint8_t> raw_channel;
+                voxels.get_channel_as_bytes_read_only(channel, raw_channel); // this will return a span of 1 value
+                Span<const uint16_t> value = raw_channel.reinterpret_cast_to<const uint16_t>(); // convert it
+
+                voxelIsCompressed = true;
+                compressedVoxelId = value[0];
+
+                if (compressedVoxelId != AIR_ID) {
+                    // nothing to do
+                    (*lightCompressedMap)[vector3iKey(blockPos)] = -1;
+                    return;
+                }
+            } else if (voxels.get_channel_compression(channel) != VoxelBuffer::COMPRESSION_NONE) {
+                // No other form of compression is allowed
+                ERR_PRINT("LightBlockTask received unsupported voxel compression");
+                return;
+            }
+
+            if (voxelIsCompressed) {
+                voxelCompressedType = static_cast<int16_t>(compressedVoxelId);
+                (*voxelCompressedCache)[blockKey] = voxelCompressedType;
+            } else {
+                (*voxelCompressedCache)[blockKey] = -1;
+
+                Span<const uint8_t> raw_channel;
+                if (!voxels.get_channel_as_bytes_read_only(channel, raw_channel)) {
+                    ERR_PRINT("Something wrong happened");
+                    return;
+                }
+
+                // I don't know where the channel depth is specified, so assert it's uint16_t I guess...
+                const VoxelBuffer::Depth channel_depth = voxels.get_channel_depth(channel);
+                ZN_ASSERT(channel_depth == VoxelBuffer::DEPTH_16_BIT);
+
+                type_buffer = raw_channel.reinterpret_cast_to<const uint16_t>();
+
+                std::shared_ptr<uint16_t> voxelDataTypeNew(new uint16_t[18*18*18], std::default_delete<uint16_t[]>());
+                
+                for (unsigned int x = 0; x <= 17; ++x) {
+                    for (unsigned int y = 0; y <= 17; ++y) {
+                        for (unsigned int z = 0; z <= 17; ++z) {
+                            const unsigned int voxel_index = y + x * row_size + z * deck_size;
+                            const unsigned int voxel_id = type_buffer[voxel_index];
+                            voxelDataTypeNew.get()[voxel_index] = voxel_id;
+                        }
+                    }
+                }
+                (*voxelDataCache)[blockKey] = voxelDataTypeNew;
+                voxelDataType = voxelDataTypeNew;
+            }
+        }
+
+        // make queue of subtasks for the flood fill algorithm
+        std::priority_queue<LightQueueItem, std::vector<LightQueueItem>, CompareLight> tasks;
+        if (compressedLight) { // entirely bright sunlight flowing down
+            // continue the compression, pass the light down to one new task and stop
+            if (voxelIsCompressed) {
+                (*lightCompressedMap)[vector3iKey(blockPos)] = 1;
+
+                Vector3i newBlockPos = blockPos + Vector3i(0, -1, 0);
+                
+                RGBLight *newLightData = (*lightMap)[vector3iKey(newBlockPos)];
+                LightBlockTask *task = ZN_NEW(LightBlockTask);
+                // task->startingLight = nullptr;
+                task->compressedLight = true;
+                task->blockPos = newBlockPos;
+                task->lightData = newLightData;
+                task->pendingBlocks = pendingBlocks;
+                task->lightMap = lightMap;
+                task->lightCompressedMap = lightCompressedMap;
+                task->originBlock = blockPos;
+                task->mesh_to_data_factor = mesh_to_data_factor;
+                task->_data = _data;
+                task->_mesher = _mesher;
+                task->_generator = _generator;
+                task->tempLock = tempLock;
+                task->blocksToRemesh = blocksToRemesh;
+                task->lightDecay = lightDecay;
+                task->lightMinimum = lightMinimum;
+                task->voxelDataCache = voxelDataCache;
+                task->voxelCompressedCache = voxelCompressedCache;
+
+                if (originBlock) {
+                    VoxelEngine::get_singleton().push_async_task(task);
+                } else {
+                    secondPassTasks->push_back(task);
+                }
+                return;
+            } else {
+            // expand the sunlight into tasks
+                RGBLight sunlight{255, 255, 255};
+                for (unsigned int i = 1; i <= 16; ++i) {
+                    for (unsigned int j = 1; j <= 16; ++j) {
+                        LightQueueItem item{sunlight, i, 16, j};
+                        tasks.push(item);
+                        lightData[index3D(item.x, item.y, item.z)] = item.light;
+                    }
+                }
+            }
+        } else { // use startingLight normally
+            for (LightQueueItem item: startingLight) {
+                RGBLight originalLight = lightData[index3D(item.x, item.y, item.z)];
+
+                if (originalLight.r >= item.light.r ||
+                    originalLight.b >= item.light.b ||
+                    originalLight.g >= item.light.g) {
+                    item.light.blendMax(originalLight);
+                } else if (originalLight.r >= item.light.r &&
+                    originalLight.b >= item.light.b &&
+                    originalLight.g >= item.light.g) {
+                    //continue; // no need for a task here
+                    // TODO: disabled task culling for now
+                }
+
+                tasks.push(item);
+                lightData[index3D(item.x, item.y, item.z)] = item.light;
+            }
+        }
+
+        // add any other light sources (emissive blocks)
+        if (!voxelIsCompressed) {
+            for (unsigned int x = 1; x < 17; ++x) {
+                for (unsigned int y = 1; y < 17; ++y) {
+                    for (unsigned int z = 1; z < 17; ++z) {
+                        const unsigned int voxel_index = y + x * row_size + z * deck_size;
+                        const unsigned int voxel_id = voxelDataType.get()[voxel_index];
+
+                        // hardcoded emissive voxels
+                        // their light value can be any color but NOT sunlight 255/255/255
+                        RGBLight emissiveColor = getEmissiveColor(voxel_id);
+                        if (emissiveColor.r == 0 && emissiveColor.g == 0 && emissiveColor.b == 0) {
+                            // block is not emissive
+                        } else {
+                            RGBLight originalLight = lightData[index3D(x, y, z)];
+
+                            if (originalLight.r >= emissiveColor.r ||
+                                originalLight.b >= emissiveColor.b ||
+                                originalLight.g >= emissiveColor.g) {
+                                emissiveColor.blendMax(originalLight);
+                            } else if (originalLight.r >= emissiveColor.r &&
+                                originalLight.b >= emissiveColor.b &&
+                                originalLight.g >= emissiveColor.g) {
+                                //continue; // no need for a task here
+                                // TODO: disabled task culling for now
+                            }
+
+                            LightQueueItem item{emissiveColor, x, y, z};
+                            tasks.push(item);
+                            lightData[index3D(item.x, item.y, item.z)] = item.light;
+                        }
+                    }
+                }
+            }
+        }
+
+        // if we got this far, light is not compressed here so update the map
+        (*lightCompressedMap)[vector3iKey(blockPos)] = 0;
+        // we want to remesh this block
+        (*blocksToRemesh).insert(blockPos);
+
+        if (tasks.size() == 0) {
+            return;
+        }
+
+        // keep track of in which directions other blocks need updating
+        bool updatedDirections[6] = {false, false, false, false, false, false};
+
+        // perform flood fill algorithm
+        int iterations = 0;
+        const int iterationsLimit = 999999;
+        while (!tasks.empty()) {
+            if (++iterations >= iterationsLimit) {
+                myprintf("iteration limit exceeded, something probably went wrong\n");
+                break;
+            }
+
+            LightQueueItem task = tasks.top();
+            tasks.pop();
+
+            // check if the light here is worth continuing with or obsoleted due to better light coming from somewhere else
+            RGBLight lightHere = lightData[index3D(task.x, task.y, task.z)];
+            if (lightHere.r > task.light.r && lightHere.g > task.light.g && lightHere.b > task.light.b) {
+                continue;
+            }
+
+            // try to propagate light to neighbours
+            unsigned int testVoxels[6][3] = {
+                {task.x - 1, task.y, task.z},
+                {task.x + 1, task.y, task.z},
+                {task.x, task.y - 1, task.z},
+                {task.x, task.y + 1, task.z},
+                {task.x, task.y, task.z - 1},
+                {task.x, task.y, task.z + 1},
+            };
+            for (int dir = 0; dir < 6; ++dir) {
+                unsigned int *testVoxel = testVoxels[dir];
+
+                // check if we're totally outside of the array and continue if so
+                bool outOfArray = false;
+                for (int i = 0; i < 3; ++i) {
+                    if (testVoxel[i] < 0 || testVoxel[i] > 17) {
+                        outOfArray = true;
+                        break;
+                    }
+                }
+                if (outOfArray)
+                    continue;
+
+                const unsigned int test_voxel_index = testVoxel[1] + testVoxel[0] * row_size + testVoxel[2] * deck_size;
+                const unsigned int test_voxel_id = voxelIsCompressed ? voxelCompressedType : voxelDataType.get()[test_voxel_index];
+
+                if (test_voxel_id != AIR_ID) {
+                    // don't propagate light through a solid block, only through air
+                    // TODO: include transparent blocks (if supported?)
+                    continue;
+                }
+
+                RGBLight newLight = task.light;
+                bool isMaximum = newLight.r == 255 && newLight.g == 255 && newLight.b == 255;
+                if (dir == 2 && isMaximum) {
+                    // special case, sunlight propagates straight down without attenuation
+                } else if (dir == 3 && isMaximum) {
+                    // sunlight should never propagate up, ever. important optimisation with no side effects
+                    continue;
+                } else {
+                    newLight.dim(LIGHT_FALLOFF, LIGHT_MIN);
+                }
+
+                // any previously calculated light at the test voxel
+                RGBLight existingLight = lightData[index3D(testVoxel[0], testVoxel[1], testVoxel[2])];
+                bool updateNeeded = false; // if any of the components change, we need to add that voxel back to the queue
+                if (newLight.r > existingLight.r) {
+                    updateNeeded = true;
+                }
+                if (newLight.g > existingLight.g) {
+                    updateNeeded = true;
+                }
+                if (newLight.b > existingLight.b) {
+                    updateNeeded = true;
+                }
+                if (updateNeeded) {
+                    // check if we're updating within the 1-voxel padding
+                    bool outOfBounds = false;
+                    for (int i = 0; i < 3; ++i) {
+                        if (testVoxel[i] < 1 || testVoxel[i] > 16) {
+                            outOfBounds = true;
+                        }
+                    }
+
+                    newLight.blendMax(existingLight);
+                    lightData[index3D(testVoxel[0], testVoxel[1], testVoxel[2])] = newLight;
+                    
+                    if (outOfBounds) { // trigger a light update in the adjacent chunk
+                        updatedDirections[dir] = true;
+
+                        // keep propagating to get edges/corners
+                        LightQueueItem newTask{newLight, testVoxel[0], testVoxel[1], testVoxel[2]};
+                        tasks.push(newTask);
+                    } else { // process this new voxel
+                        LightQueueItem newTask{newLight, testVoxel[0], testVoxel[1], testVoxel[2]};
+                        tasks.push(newTask);
+                    }
+                }
+            }
+        }
+
+        Vector3i adjacentBlocks[6] = {
+            Vector3i(blockPos.x - 1, blockPos.y, blockPos.z),
+            Vector3i(blockPos.x + 1, blockPos.y, blockPos.z),
+            Vector3i(blockPos.x, blockPos.y - 1, blockPos.z),
+            Vector3i(blockPos.x, blockPos.y + 1, blockPos.z),
+            Vector3i(blockPos.x, blockPos.y, blockPos.z - 1),
+            Vector3i(blockPos.x, blockPos.y, blockPos.z + 1),
+        };
+        // create new LightBlockTasks to trigger updates for any blocks where data flowed out of bounds
+        for (int i = 0; i < 6; ++i) {
+            if (!updatedDirections[i])
+                continue; // no light flowed out on this side
+            
+            Vector3i newBlockPos = adjacentBlocks[i];
+            uint32_t newBlockKey = vector3iKey(newBlockPos);
+
+            if (pendingBlocks->find(newBlockKey) == pendingBlocks->end() && lightMap->find(newBlockKey) == lightMap->end())
+                continue; // don't update this block if it's neither queued up, nor processed during a previous meshing batch
+
+            if (lightCompressedMap->find(newBlockKey) != lightCompressedMap->end()) {
+                if ((*lightCompressedMap)[newBlockKey] == 1) {
+                    continue; // don't flow light into a compressed light chunk
+                }
+            }
+
+            // populate startingLight for the new LightBlockTask, passing a plane of light across blocks
+            std::vector<LightQueueItem> newStartingLight;
+            Vector3i minNew{1, 1, 1};
+            Vector3i maxNew{16, 16, 16}; // inclusive
+            if (i == 0) {
+                minNew.x = 1;
+                maxNew.x = 1;
+            } else if (i == 1) {
+                minNew.x = 16;
+                maxNew.x = 16;
+            } else if (i == 2) {
+                minNew.y = 1;
+                maxNew.y = 1;
+            } else if (i == 3) {
+                minNew.y = 16;
+                maxNew.y = 16;
+            } else if (i == 4) {
+                minNew.z = 1;
+                maxNew.z = 1;
+            } else if (i == 5) {
+                minNew.z = 16;
+                maxNew.z = 16;
+            }
+            Vector3i delta = (newBlockPos - blockPos) * 16;
+            for (int x = minNew.x; x <= maxNew.x; ++x) {
+                for (int y = minNew.y; y <= maxNew.y; ++y) {
+                    for (int z = minNew.z; z <= maxNew.z; ++z) {
+                        Vector3i oldVox = Vector3i(x, y, z);
+                        Vector3i newVox = oldVox - delta; // translate to other block
+                        RGBLight light = lightData[index3D(oldVox.x, oldVox.y, oldVox.z)];
+                        if (light.r > 0 && light.g > 0 && light.b > 0) {
+                            LightQueueItem item{
+                                light,
+                                static_cast<uint8_t>(newVox.x),
+                                static_cast<uint8_t>(newVox.y),
+                                static_cast<uint8_t>(newVox.z),
+                            };
+                            newStartingLight.push_back(item);
+                        }
+                    }
+                }
+            }
+
+            RGBLight *newLightData = (*lightMap)[newBlockKey];
+            LightBlockTask *task = ZN_NEW(LightBlockTask);
+            task->startingLight = newStartingLight;
+            task->compressedLight = false;
+            task->blockPos = newBlockPos;
+            task->lightData = newLightData;
+            task->pendingBlocks = pendingBlocks;
+            task->lightMap = lightMap;
+            task->lightCompressedMap = lightCompressedMap;
+            task->originBlock = blockPos;
+            task->mesh_to_data_factor = mesh_to_data_factor;
+            task->_data = _data;
+            task->_mesher = _mesher;
+            task->_generator = _generator;
+            task->tempLock = tempLock;
+            task->blocksToRemesh = blocksToRemesh;
+            task->lightDecay = lightDecay;
+            task->lightMinimum = lightMinimum;
+            task->voxelDataCache = voxelDataCache;
+            task->voxelCompressedCache = voxelCompressedCache;
+            // task->firstPassMutex = firstPassMutex;
+            // task->firstPassCV = firstPassCV;
+            // task->firstPassBool = firstPassBool;
+
+            if (originBlock) {
+                VoxelEngine::get_singleton().push_async_task(task);
+            } else {
+                secondPassTasks->push_back(task);
+            }
+        }
+
+        myprintf("(%d, %d, %d) finished\n", blockPos.x, blockPos.y, blockPos.z);
+    }
+};
+
 void VoxelTerrain::process_meshing() {
 	ZN_PROFILE_SCOPE();
 	ProfilingClock profiling_clock;
@@ -1829,6 +2619,252 @@ void VoxelTerrain::process_meshing() {
 	const int mesh_to_data_factor = get_mesh_block_size() / get_data_block_size();
 
 	BufferedTaskScheduler &scheduler = BufferedTaskScheduler::get_for_current_thread();
+
+    bool performLighting = !Engine::get_singleton()->is_editor_hint() && _lighting_enabled;
+
+    if (performLighting) {
+        if (_use_baked_light && !_performed_initial_light_load) {
+            loadLightData();
+            _performed_initial_light_load = true;
+        }
+
+        if (_calculate_light) {
+            std::vector<Vector3i> firstPassBlocks;
+            
+            std::unordered_set<Vector3i> blocksToRemesh;
+
+            // index these with vector3iKey(Vector3i)
+            std::unordered_map<uint32_t, std::mutex> pendingBlocks;
+            std::unordered_map<uint32_t, std::mutex> firstPassMutex;
+            std::unordered_map<uint32_t, std::condition_variable> firstPassCV;
+            std::unordered_map<uint32_t, bool> firstPassBool;
+            std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> voxelDataCache;
+            std::unordered_map<uint32_t, int16_t> voxelCompressedCache;
+            if (_blocks_pending_update.size() > 0) {
+                // keep track of which blocks are pending
+                for (size_t bi = 0; bi < _blocks_pending_update.size(); ++bi) {
+                    const Vector3i mesh_block_pos = _blocks_pending_update[bi];
+                    uint32_t key = vector3iKey(mesh_block_pos);
+                    if (_lightCompressedMap.find(key) != _lightCompressedMap.end()) {
+                        // we already processed this block, don't do it again
+                        continue;
+                    }
+
+                    firstPassBlocks.push_back(mesh_block_pos);
+                    blocksToRemesh.insert(mesh_block_pos);
+                }
+
+                for (Vector3i blockPos: firstPassBlocks) {
+                    uint32_t key = vector3iKey(blockPos);
+                    pendingBlocks.try_emplace(key);
+                    firstPassMutex.try_emplace(key);
+                    firstPassCV.try_emplace(key);
+                    firstPassBool.try_emplace(false);
+                }
+
+                std::mutex tempLock; // make the threads entirely synchronous
+                std::vector<LightBlockTask*> secondPassTasks;
+
+                // process light for each block
+                for (Vector3i blockPos: firstPassBlocks) {
+                    uint32_t key = vector3iKey(blockPos);
+
+                    bool compressedLight = false;
+                    std::vector<LightQueueItem> startingLight;
+                    if (_sunlight_enabled && blockPos.y >= _sunlight_y_level) {
+                        compressedLight = true; // top starts off with sunlight
+                    }
+
+                    if (_lightMap.find(key) == _lightMap.end()) {
+                        // initialise light data for that block, if it doesn't exist
+                        RGBLight *lightData = new RGBLight[18 * 18 * 18];
+                        for (int i = 0; i < 18; i++) {
+                            for (int j = 0; j < 18; j++) {
+                                for (int k = 0; k < 18; k++) {
+                                    lightData[index3D(i, j, k)] = RGBLight{0, 0, 0};
+                                }
+                            }
+                        }
+                        _lightMap[key] = lightData;
+
+                        LightBlockTask *task = ZN_NEW(LightBlockTask);
+                        task->compressedLight = compressedLight;
+                        task->blockPos = blockPos;
+                        task->lightData = lightData;
+                        task->pendingBlocks = &pendingBlocks;
+                        task->lightMap = &_lightMap;
+                        task->lightCompressedMap = &_lightCompressedMap;
+                        task->mesh_to_data_factor = mesh_to_data_factor;
+                        task->_data = _data;
+                        task->_mesher = get_mesher();
+                        task->_generator = get_generator();
+                        task->tempLock = &tempLock;
+                        task->secondPassTasks = &secondPassTasks;
+                        task->blocksToRemesh = &blocksToRemesh;
+                        task->lightDecay = _light_decay;
+                        task->lightMinimum = _light_minimum;
+                        task->voxelDataCache = &voxelDataCache;
+                        task->voxelCompressedCache = &voxelCompressedCache;
+                        scheduler.push_main_task(task);
+                    }
+                }
+
+                scheduler.flush();
+                VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
+
+                // send updates from any adjacent (6-directional) blocks to those processed, using the precomputed light edge data
+                Vector3i adjacentBlockOffset[6] = {
+                    Vector3i(-1, 0, 0),
+                    Vector3i(1, 0, 0),
+                    Vector3i(0, -1, 0),
+                    Vector3i(0, 1, 0),
+                    Vector3i(0, 0, -1),
+                    Vector3i(0, 0, 1),
+                };
+                Vector3i mins[6] = {
+                    Vector3i(16, 1, 1),
+                    Vector3i(1, 1, 1),
+                    Vector3i(1, 16, 1),
+                    Vector3i(1, 1, 1),
+                    Vector3i(1, 1, 16),
+                    Vector3i(1, 1, 1),
+                };
+                Vector3i maxs[6] = { // inclusive
+                    Vector3i(16, 16, 16),
+                    Vector3i(1, 16, 16),
+                    Vector3i(16, 16, 16),
+                    Vector3i(16, 1, 16),
+                    Vector3i(16, 16, 16),
+                    Vector3i(16, 16, 1),
+                };
+                for (Vector3i blockPos: firstPassBlocks) {
+                    uint32_t blockKey = vector3iKey(blockPos);
+                    if (_lightCompressedMap[blockKey] != 0)
+                        continue; // don't trigger updates on compressed blocks
+                    
+                    RGBLight* lightData = _lightMap[blockKey];
+
+                    for (int d = 0; d < 6; ++d) {
+                        Vector3i newBlockPos = blockPos + adjacentBlockOffset[d];
+                        Vector3i min = mins[d];
+                        Vector3i max = maxs[d];
+                        Vector3i voxOffset = 16 * adjacentBlockOffset[d];
+
+                        uint32_t newBlockKey = vector3iKey(newBlockPos);
+
+                        if (pendingBlocks.find(newBlockKey) != pendingBlocks.end())
+                            continue; // don't trigger an update if we already processed this block in the first pass
+
+                        if (_lightCompressedMap.find(newBlockKey) == _lightCompressedMap.end())
+                            continue; // don't trigger an update if the adjacent block has no light data
+
+                        // initialise starting light values for the new task
+                        std::vector<LightQueueItem> newStartingLight;
+
+                        int8_t lightCompressed = _lightCompressedMap[newBlockKey];
+                        RGBLight* adjacentLightData; // may be unset if light is compressed
+                        if (lightCompressed == 0) { // light is not compressed
+                            adjacentLightData = _lightMap[newBlockKey];
+                        }
+
+                        for (int x = min.x; x <= max.x; ++x) {
+                            for (int y = min.y; y <= max.y; ++y) {
+                                for (int z = min.z; z <= max.z; ++z) {
+                                    Vector3i voxPos{x, y, z}; // position in the sampled new block
+                                    Vector3i transformedVoxPos = voxPos + voxOffset; // voxPos transformed back to the original block
+
+                                    if (lightCompressed == 0) { // light is not compressed
+                                        RGBLight lightValueAdjacent = adjacentLightData[index3D(voxPos.x, voxPos.y, voxPos.z)];
+                                        RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
+                                        if (lightValueAdjacent.r > 0 && lightValueAdjacent.g > 0 && lightValueAdjacent.b > 0) {
+                                            // make sure this blends rather than overwriting existing values
+                                            if (lightValueAdjacent.r > lightValueHere.r || lightValueAdjacent.g > lightValueHere.g || lightValueAdjacent.b > lightValueHere.b) {
+                                                lightValueHere.blendMax(lightValueAdjacent);
+                                                LightQueueItem item{lightValueHere,
+                                                    static_cast<unsigned>(transformedVoxPos.x),
+                                                    static_cast<unsigned>(transformedVoxPos.y),
+                                                    static_cast<unsigned>(transformedVoxPos.z)
+                                                };
+                                                newStartingLight.push_back(item);
+
+                                                uint32_t finalIndex = index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z);
+                                                lightData[finalIndex] = lightValueHere;
+                                            }
+                                        }
+                                    } else { // light is compressed
+                                        if (lightCompressed == 1) {
+                                            // don't create an item if there is already sunlight in the local block
+                                            RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
+                                            if (lightValueHere.r < 255 || lightValueHere.g < 255 || lightValueHere.b < 255) {
+                                                LightQueueItem item{RGBLight{255, 255, 255}, 
+                                                    static_cast<unsigned>(transformedVoxPos.x),
+                                                    static_cast<unsigned>(transformedVoxPos.y),
+                                                    static_cast<unsigned>(transformedVoxPos.z)};
+                                                newStartingLight.push_back(item);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // only spawn a task if there would be more than 0 updates
+                        if (newStartingLight.size() > 0) {
+                            LightBlockTask *task = ZN_NEW(LightBlockTask);
+                            task->startingLight = newStartingLight;
+                            task->compressedLight = false;
+                            task->blockPos = blockPos;
+                            task->lightData = lightData;
+                            task->pendingBlocks = &pendingBlocks;
+                            task->lightMap = &_lightMap;
+                            task->lightCompressedMap = &_lightCompressedMap;
+                            task->originBlock = blockPos;
+                            task->mesh_to_data_factor = mesh_to_data_factor;
+                            task->_data = _data;
+                            task->_mesher = get_mesher();
+                            task->_generator = get_generator();
+                            task->tempLock = &tempLock;
+                            task->secondPassTasks = &secondPassTasks;
+                            task->blocksToRemesh = &blocksToRemesh;
+                            task->lightDecay = _light_decay;
+                            task->lightMinimum = _light_minimum;
+                            task->voxelDataCache = &voxelDataCache;
+                            task->voxelCompressedCache = &voxelCompressedCache;
+                            
+                            secondPassTasks.push_back(task);
+                        }
+                    }
+                }
+
+                for (LightBlockTask *task: secondPassTasks) {
+                    scheduler.push_main_task(task);
+                }
+                scheduler.flush();
+                VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
+            }
+
+            for (const Vector3i &blockPos: blocksToRemesh) {
+                // add them to _blocks_pending_update if they aren't already in the list, to stop everything from falling apart
+                VoxelMeshBlockVT *mesh_block = _mesh_map.get_block(blockPos);
+
+                // some of these blocks will already be added to the pending list, so ignore those
+                if (mesh_block != nullptr && !mesh_block->is_in_update_list) {
+                    // from try_schedule_mesh_update
+                    const int render_to_data_factor = get_mesh_block_size() / get_data_block_size();
+
+                    const Box3i data_box =
+                            Box3i(mesh_block->position * render_to_data_factor, Vector3iUtil::create(render_to_data_factor)).padded(1);
+
+                    const bool data_available = _data->has_all_blocks_in_area(data_box, 0);
+
+                    if (data_available) { // prevents crashes
+                        mesh_block->is_in_update_list = true;
+                        _blocks_pending_update.push_back(mesh_block->position);
+                    }
+                }
+            }
+        }
+    }
 
 	for (size_t bi = 0; bi < _blocks_pending_update.size(); ++bi) {
 		ZN_PROFILE_SCOPE_NAMED("Block");
@@ -1862,6 +2898,27 @@ void VoxelTerrain::process_meshing() {
 		task->require_visual = mesh_block->mesh_viewers.get() > 0;
 		task->collision_hint = _generate_collisions && mesh_block->collision_viewers.get() > 0;
 		task->data = _data;
+        task->lightingEnabled = performLighting;
+
+        if (performLighting) {
+            task->lightMinimum = _light_minimum;
+
+            uint32_t key = vector3iKey(mesh_block_pos);
+            if (_lightCompressedMap.find(key) == _lightCompressedMap.end()) {
+                task->lightCompressedData = _sunlight_enabled ? 1 : -1; // we don't have light data here, light it if sunlight enabled otherwise darken it
+            } else {
+                int8_t lightCompressedData = _lightCompressedMap[key];
+                if (lightCompressedData == 0) { // light is not compressed here
+                    ZN_ASSERT(_lightMap.find(key) != _lightMap.end());
+
+                    std::array<RGBLight, 20*20*20> lightDataArray = fixLightCubeSides(mesh_block_pos, _lightMap[key], &_lightMap, &_lightCompressedMap, _sunlight_enabled); // add extra data for adjacent blocks
+                    task->lightData = lightDataArray;
+                    task->lightCompressedData = 0;
+                } else {
+                    task->lightCompressedData = lightCompressedData; // this probably won't happen, but w/e
+                }
+            }
+        }
 
 		// This iteration order is specifically chosen to match VoxelEngine and threaded access
 		_data->get_blocks_with_voxel_data(data_box, 0, to_span(task->blocks));
@@ -1905,6 +2962,171 @@ void VoxelTerrain::process_meshing() {
 
 	// print_line(String("d:") + String::num(_dirty_blocks.size()) + String(", q:") +
 	// String::num(_block_update_queue.size()));
+}
+
+void VoxelTerrain::loadLightData() {
+    ERR_FAIL_COND(_light_directory == "");
+
+    Error err;
+    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
+    if (dir.is_null()) {
+        ERR_PRINT(String("Could not load light data from {0}").format(varray(_light_directory)));
+        return;
+    }
+
+    dir->list_dir_begin();
+    String file_name = dir->get_next();
+    while (!file_name.is_empty()) {
+        if (!dir->current_is_dir()) {
+            String filePath = _light_directory.path_join(file_name);
+
+            Error err2;
+            Ref<FileAccess> f = zylann::godot::open_file(filePath, FileAccess::READ, err2);
+            if (f.is_null()) {
+                ERR_PRINT(String("Could not read file"));
+                return;
+            }
+
+            // first 12 bytes are x, y, z coords of the block
+            int32_t blockX = static_cast<int32_t>(f->get_32());
+            int32_t blockY = static_cast<int32_t>(f->get_32());
+            int32_t blockZ = static_cast<int32_t>(f->get_32());
+            Vector3i blockPos{blockX, blockY, blockZ};
+            uint32_t blockKey = vector3iKey(blockPos);
+
+            // remainder of file will either contain 1 byte (compressed) or 18*18*18*3 bytes
+            uint64_t length = f->get_length();
+            if (length == 4*3 + 1) { // compressed
+                int8_t value = static_cast<int8_t>(f->get_8());
+                _lightCompressedMap[blockKey] = value;
+            } else { // uncompressed
+                ZN_ASSERT(length == 4*3 + 18*18*18*3);
+
+                RGBLight *lightData = new RGBLight[18*18*18];
+                for (int i = 0; i < 18; i++) {
+                    for (int j = 0; j < 18; j++) {
+                        for (int k = 0; k < 18; k++) {
+                            uint8_t r = f->get_8();
+                            uint8_t g = f->get_8();
+                            uint8_t b = f->get_8();
+                            lightData[index3D(i, j, k)] = RGBLight{r, g, b};
+                        }
+                    }
+                }
+
+                _lightCompressedMap[blockKey] = 0;
+                _lightMap[blockKey] = lightData;
+            }
+        }
+        file_name = dir->get_next();
+    }
+    dir->list_dir_end();
+}
+
+void VoxelTerrain::saveLightData() {
+	ERR_FAIL_COND(_light_directory == "");
+
+    for (const std::pair<const uint32_t, int8_t>& entry: _lightCompressedMap) {
+        uint32_t blockKey = entry.first;
+        std::string ext = ".bin";
+        String filePath = _light_directory.path_join((std::to_string(blockKey) + ext).c_str());
+
+        Error err;
+        Ref<FileAccess> f = zylann::godot::open_file(filePath, FileAccess::WRITE, err);
+        if (f.is_null()) {
+            ERR_PRINT(String("Could not save light data to {0}").format(varray(_light_directory)));
+            return;
+        }
+        
+        Vector3i blockPos = reverseVector3iKey(blockKey);
+        int32_t blockX = static_cast<int32_t>(blockPos.x);
+        int32_t blockY = static_cast<int32_t>(blockPos.y);
+        int32_t blockZ = static_cast<int32_t>(blockPos.z);
+        f->store_32(blockX);
+        f->store_32(blockY);
+        f->store_32(blockZ);
+
+        int8_t compressedLightValue = entry.second;
+
+        if (compressedLightValue == 0) { // light is not compressed
+            RGBLight* lightData = _lightMap[blockKey];
+            int size = 18 * 18 * 18 * 3; // TODO: I should really save the 20x20x20 arrays in lightMap...
+            f->store_buffer(reinterpret_cast<const uint8_t*>(lightData), size);
+            // printf("Saved block (%d) of size %d\n", blockKey, size);
+        } else {
+            f->store_8(static_cast<int8_t>(compressedLightValue));
+            // printf("Saved block (%d) [compressed %d]\n", blockKey, compressedLightValue);
+        }
+        f->close();
+    }
+}
+
+void VoxelTerrain::deleteAllLightData() {
+    ERR_FAIL_COND(_light_directory == "");
+
+    Error err;
+    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
+    if (dir.is_null()) {
+        ERR_PRINT(String("Could not access {0}").format(varray(_light_directory)));
+        return;
+    }
+    
+    dir->erase_contents_recursive();
+}
+
+void VoxelTerrain::deleteLightData(int x, int y, int z, int radius) {
+    ERR_FAIL_COND(_light_directory == "");
+
+    Error err;
+    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
+    if (dir.is_null()) {
+        ERR_PRINT(String("Could not load light data from {0}").format(varray(_light_directory)));
+        return;
+    }
+
+    for (int i = x - radius; i <= x + radius; i++) {
+        for (int j = y - radius; j <= y + radius; j++) {
+            for (int k = z - radius; k <= z + radius; k++) {
+                uint32_t blockKey = vector3iKey(Vector3i(i, j, k));
+                std::string ext = ".bin";
+                String fileName((std::to_string(blockKey) + ext).c_str());
+
+                dir->remove(fileName);
+            }
+        }
+    }
+}
+
+void VoxelTerrain::set_lighting_enabled(bool enabled) {
+	_lighting_enabled = enabled;
+}
+
+void VoxelTerrain::set_calculate_light(bool enabled) {
+	_calculate_light = enabled;
+}
+
+void VoxelTerrain::set_use_baked_light(bool enabled) {
+	_use_baked_light = enabled;
+}
+
+void VoxelTerrain::set_light_directory(String directory) {
+	_light_directory = directory;
+}
+
+void VoxelTerrain::set_sunlight_enabled(bool enabled) {
+	_sunlight_enabled = enabled;
+}
+
+void VoxelTerrain::set_sunlight_y_level(int value) {
+	_sunlight_y_level = value;
+}
+
+void VoxelTerrain::set_light_decay(int decay) {
+	_light_decay = std::clamp(decay, 2, 128);
+}
+
+void VoxelTerrain::set_light_minimum(int mimimum) {
+	_light_minimum = std::clamp(mimimum, 1, 127);
 }
 
 void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
@@ -2363,6 +3585,34 @@ bool VoxelTerrain::_b_is_area_meshed(AABB aabb) const {
 void VoxelTerrain::_bind_methods() {
 	using Self = VoxelTerrain;
 
+	ClassDB::bind_method(D_METHOD("set_lighting_enabled", "enabled"), &Self::set_lighting_enabled);
+	ClassDB::bind_method(D_METHOD("get_lighting_enabled"), &Self::get_lighting_enabled);
+
+	ClassDB::bind_method(D_METHOD("set_calculate_light", "enabled"), &Self::set_calculate_light);
+	ClassDB::bind_method(D_METHOD("get_calculate_light"), &Self::get_calculate_light);
+
+	ClassDB::bind_method(D_METHOD("set_use_baked_light", "enabled"), &Self::set_use_baked_light);
+	ClassDB::bind_method(D_METHOD("get_use_baked_light"), &Self::get_use_baked_light);
+
+	ClassDB::bind_method(D_METHOD("set_light_directory", "directory"), &Self::set_light_directory);
+	ClassDB::bind_method(D_METHOD("get_light_directory"), &Self::get_light_directory);
+
+	ClassDB::bind_method(D_METHOD("set_sunlight_enabled", "enabled"), &Self::set_sunlight_enabled);
+	ClassDB::bind_method(D_METHOD("get_sunlight_enabled"), &Self::get_sunlight_enabled);
+
+	ClassDB::bind_method(D_METHOD("set_sunlight_y_level", "value"), &Self::set_sunlight_y_level);
+	ClassDB::bind_method(D_METHOD("get_sunlight_y_level"), &Self::get_sunlight_y_level);
+
+	ClassDB::bind_method(D_METHOD("set_light_decay", "decay"), &Self::set_light_decay);
+	ClassDB::bind_method(D_METHOD("get_light_decay"), &Self::get_light_decay);
+
+	ClassDB::bind_method(D_METHOD("set_light_minimum", "minimum"), &Self::set_light_minimum);
+	ClassDB::bind_method(D_METHOD("get_light_minimum"), &Self::get_light_minimum);
+
+	ClassDB::bind_method(D_METHOD("save_light_data"), &Self::saveLightData);
+	ClassDB::bind_method(D_METHOD("delete_all_light_data"), &Self::deleteAllLightData);
+	ClassDB::bind_method(D_METHOD("delete_light_data", "x", "y", "z", "radius"), &Self::deleteLightData);
+
 	ClassDB::bind_method(D_METHOD("set_material_override", "material"), &Self::set_material_override);
 	ClassDB::bind_method(D_METHOD("get_material_override"), &Self::get_material_override);
 
@@ -2444,6 +3694,17 @@ void VoxelTerrain::_bind_methods() {
 	GDVIRTUAL_BIND(_on_data_block_entered, "info");
 	GDVIRTUAL_BIND(_on_area_edited, "area_origin", "area_size");
 #endif
+
+	ADD_GROUP("Flood Fill Lighting", "");
+
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_enabled"), "set_lighting_enabled", "get_lighting_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "calculate_light"), "set_calculate_light", "get_calculate_light");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_baked_light"), "set_use_baked_light", "get_use_baked_light");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "directory", PROPERTY_HINT_DIR), "set_light_directory", "get_light_directory");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sunlight_enabled"), "set_sunlight_enabled", "get_sunlight_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sunlight_y_level"), "set_sunlight_y_level", "get_sunlight_y_level");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "light_decay"), "set_light_decay", "get_light_decay");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "light_minimum"), "set_light_minimum", "get_light_minimum");
 
 	ADD_GROUP("Bounds", "");
 

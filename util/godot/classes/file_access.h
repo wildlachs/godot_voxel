@@ -3,10 +3,12 @@
 
 #if defined(ZN_GODOT)
 #include <core/io/file_access.h>
+#include <core/io/dir_access.h>
 
 #elif defined(ZN_GODOT_EXTENSION)
 #include "../core/packed_arrays.h"
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp> // For `Error`
 using namespace godot;
 #endif
@@ -14,6 +16,20 @@ using namespace godot;
 #include "../../containers/span.h"
 
 namespace zylann::godot {
+
+inline Ref<DirAccess> open_dir(const String path, Error &out_error) {
+#if defined(ZN_GODOT)
+	return DirAccess::open(path, &out_error);
+#elif defined(ZN_GODOT_EXTENSION)
+	Ref<DirAccess> dir = DirAccess::open(path);
+	out_error = DirAccess::get_open_error();
+	if (out_error != ::godot::OK) {
+		return Ref<DirAccess>();
+	} else {
+		return dir;
+	}
+#endif
+}
 
 inline Ref<FileAccess> open_file(const String path, FileAccess::ModeFlags mode_flags, Error &out_error) {
 #if defined(ZN_GODOT)

@@ -14,6 +14,7 @@
 #include "../voxel_node.h"
 #include "voxel_mesh_block_vt.h"
 #include "voxel_terrain_multiplayer_synchronizer.h"
+#include "../../util/godot/classes/file_access.h"
 
 #ifdef TOOLS_ENABLED
 #include "../../util/godot/debug_renderer.h"
@@ -44,6 +45,67 @@ public:
 
 	VoxelTerrain();
 	~VoxelTerrain();
+
+    // light data
+    std::unordered_map<uint32_t, RGBLight*> _lightMap;
+    // 1: light compressed and full sun
+    // 0: no compression
+    // -1: light compressed and no sun
+    std::unordered_map<uint32_t, int8_t> _lightCompressedMap;
+    bool _performed_initial_light_load = false;
+
+    void loadLightData();
+    void saveLightData();
+    void deleteAllLightData();
+    void deleteLightData(int x, int y, int z, int radius);
+    
+    bool _lighting_enabled = true;
+    void set_lighting_enabled(bool enabled);
+    bool get_lighting_enabled() const {
+        return _lighting_enabled;
+    }
+    
+    bool _calculate_light = true;
+    void set_calculate_light(bool enabled);
+    bool get_calculate_light() const {
+        return _calculate_light;
+    }
+    
+    bool _use_baked_light = false;
+    void set_use_baked_light(bool enabled);
+    bool get_use_baked_light() const {
+        return _use_baked_light;
+    }
+    
+    String _light_directory;
+    void set_light_directory(String directory);
+    String get_light_directory() const {
+        return _light_directory;
+    }
+    
+    bool _sunlight_enabled = true;
+    void set_sunlight_enabled(bool enabled);
+    bool get_sunlight_enabled() const {
+        return _sunlight_enabled;
+    }
+    
+    int _sunlight_y_level = 2;
+    void set_sunlight_y_level(int value);
+    int get_sunlight_y_level() const {
+        return _sunlight_y_level;
+    }
+    
+    int _light_decay = 16;
+    void set_light_decay(int decay);
+    int get_light_decay() const {
+        return _light_decay;
+    }
+    
+    int _light_minimum = 15;
+    void set_light_minimum(int decay);
+    int get_light_minimum() const {
+        return _light_minimum;
+    }
 
 	void set_stream(Ref<VoxelStream> p_stream) override;
 	Ref<VoxelStream> get_stream() const override;

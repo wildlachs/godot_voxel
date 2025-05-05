@@ -10,6 +10,8 @@
 #include "../util/godot/classes/array_mesh.h"
 #include "../util/tasks/cancellation_token.h"
 #include "../util/tasks/threaded_task.h"
+#include "../util/rgblight.h"
+#include <array>
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 #include "../engine/detail_rendering/detail_rendering.h"
@@ -74,6 +76,12 @@ public:
 	PriorityDependency priority_dependency;
 	std::shared_ptr<MeshingDependency> meshing_dependency;
 	std::shared_ptr<VoxelData> data;
+
+    bool lightingEnabled;
+    std::array<RGBLight, 20*20*20> lightData;
+    int8_t lightCompressedData = 0;
+    int lightMinimum;
+
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 	DetailRenderingSettings detail_texture_settings;
 #endif

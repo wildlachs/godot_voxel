@@ -1,3 +1,5 @@
+Please read [LIGHTING.md](LIGHTING.md) for information on flood fill lighting.
+
 Voxel Tools for Godot
 =========================
 

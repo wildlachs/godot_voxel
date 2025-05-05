@@ -20,6 +20,24 @@ class VoxelMesherBlocky : public VoxelMesher {
 public:
 	static const int PADDING = 1;
 
+    bool _smooth_lighting = false;
+    void set_smooth_lighting(bool enabled);
+    bool get_smooth_lighting() const {
+        return _smooth_lighting;
+    }
+
+    bool _shadow_sampling_trick = false;
+    void set_shadow_sampling_trick(bool enabled);
+    bool get_shadow_sampling_trick() const {
+        return _shadow_sampling_trick;
+    }
+
+    int _shadow_sampling_trick_penalty = 40;
+    void set_shadow_sampling_trick_penalty(int penalty);
+    int get_shadow_sampling_trick_penalty() const {
+        return _shadow_sampling_trick_penalty;
+    }
+
 	VoxelMesherBlocky();
 	~VoxelMesherBlocky();
 

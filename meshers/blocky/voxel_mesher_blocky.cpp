@@ -43,7 +43,14 @@ void generate_mesh(
 		const BakedLibrary &library,
 		const bool bake_occlusion,
 		const float baked_occlusion_darkness,
-		const TintSampler tint_sampler
+		const TintSampler tint_sampler,
+        const bool lightingEnabled,
+        const std::array<RGBLight, 20*20*20> &lightData,
+        const int8_t lightCompressedData,
+        const int lightMinimum,
+        const bool _shadow_sampling_trick,
+        const int _shadow_sampling_trick_penalty,
+        const bool _smooth_lighting
 ) {
 	// TODO Optimization: not sure if this mandates a template function. There is so much more happening in this
 	// function other than reading voxels, although reading is on the hottest path. It needs to be profiled. If
@@ -331,41 +338,61 @@ void generate_mesh(
 							arrays.colors.resize(arrays.colors.size() + vertex_count);
 							Color *w = arrays.colors.data() + append_index;
 
-							if (bake_occlusion) {
-								for (unsigned int i = 0; i < vertex_count; ++i) {
-									const Vector3f vertex_pos = side_positions[i];
+                            for (unsigned int i = 0; i < vertex_count; ++i) {
+                                const Vector3f vertex_pos = side_positions[i];
 
-									// General purpose occlusion colouring.
-									// TODO Optimize for cubes
-									// TODO Fix occlusion inconsistency caused by triangles orientation? Not sure if
-									// worth it
-									float shade = 0;
-									for (unsigned int j = 0; j < 4; ++j) {
-										unsigned int corner = Cube::g_side_corners[side][j];
-										if (shaded_corner[corner] != 0) {
-											float s = baked_occlusion_darkness *
-													static_cast<float>(shaded_corner[corner]);
-											// float k = 1.f - Cube::g_corner_position[corner].distance_to(v);
-											float k = 1.f -
-													math::distance_squared(Cube::g_corner_position[corner], vertex_pos);
-											if (k < 0.0) {
-												k = 0.0;
-											}
-											s *= k;
-											if (s > shade) {
-												shade = s;
-											}
-										}
-									}
-									const float gs = 1.0 - shade;
-									w[i] = Color(gs, gs, gs) * modulate_color;
-								}
+                                // General purpose occlusion colouring.
+                                // TODO Optimize for cubes
+                                // TODO Fix occlusion inconsistency caused by triangles orientation? Not sure if
+                                // worth it
+                                float shade = 0;
+                                for (unsigned int j = 0; j < 4; ++j) {
+                                    unsigned int corner = Cube::g_side_corners[side][j];
+                                    if (shaded_corner[corner] != 0) {
+                                        float s = baked_occlusion_darkness *
+                                                static_cast<float>(shaded_corner[corner]);
+                                        // float k = 1.f - Cube::g_corner_position[corner].distance_to(v);
+                                        float k = 1.f -
+                                                math::distance_squared(Cube::g_corner_position[corner], vertex_pos);
+                                        if (k < 0.0) {
+                                            k = 0.0;
+                                        }
+                                        s *= k;
+                                        if (s > shade) {
+                                            shade = s;
+                                        }
+                                    }
+                                }
 
-							} else {
-								for (unsigned int i = 0; i < vertex_count; ++i) {
-									w[i] = modulate_color;
-								}
-							}
+                                if (lightingEnabled) {
+                                    Vector3f side_normal = to_vec3f(Cube::g_side_normals[side]);
+
+                                    // pos - position of voxel
+                                    // vertex_pos - position of vertex (0 to 1)
+                                    // side_normal - normal vector
+                                    RGBLight l;
+                                    if (lightCompressedData == 1) {
+                                        l = RGBLight{255, 255, 255};
+                                    } else if (lightCompressedData == -1) {
+                                        l = RGBLight{0, 0, 0};
+                                    } else {
+                                        if (_smooth_lighting) {
+                                            l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+                                        } else {
+                                            l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+                                        }
+                                    }
+                                    w[i] = Color(float(l.r) / 255., float(l.g) / 255., float(l.b) / 255.);
+                                } else {
+                                    w[i] = Color(1.0, 1.0, 1.0);
+                                }
+
+                                if (bake_occlusion) {
+                                    const float gs = 1.0 - shade;
+                                    w[i] *= Color(gs, gs, gs); // AO
+                                }
+                                w[i] *= modulate_color;
+                            }
 						}
 
 						const StdVector<int> &side_indices = side_surface.indices;
@@ -658,7 +685,14 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						library_baked_data,
 						params.bake_occlusion,
 						baked_occlusion_darkness,
-						tint_sampler
+						tint_sampler,
+                        input.lightingEnabled,
+                        input.lightData,
+                        input.lightCompressedData,
+                        input.lightMinimum,
+                        _shadow_sampling_trick,
+                        _shadow_sampling_trick_penalty,
+                        _smooth_lighting
 				);
 				if (input.lod_index > 0) {
 					blocky::append_skirts(
@@ -677,7 +711,14 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						library_baked_data,
 						params.bake_occlusion,
 						baked_occlusion_darkness,
-						tint_sampler
+						tint_sampler,
+                        input.lightingEnabled,
+                        input.lightData,
+                        input.lightCompressedData,
+                        input.lightMinimum,
+                        _shadow_sampling_trick,
+                        _shadow_sampling_trick_penalty,
+                        _smooth_lighting
 				);
 				if (input.lod_index > 0) {
 					blocky::append_skirts(model_ids, block_size, arrays_per_material, library_baked_data, tint_sampler);
@@ -849,6 +890,18 @@ unsigned int VoxelMesherBlocky::get_material_index_count() const {
 	return lib->get_material_index_count();
 }
 
+void VoxelMesherBlocky::set_smooth_lighting(bool enabled) {
+    _smooth_lighting = enabled;
+}
+
+void VoxelMesherBlocky::set_shadow_sampling_trick(bool enabled) {
+    _shadow_sampling_trick = enabled;
+}
+
+void VoxelMesherBlocky::set_shadow_sampling_trick_penalty(int penalty) {
+    _shadow_sampling_trick_penalty = std::clamp(penalty, 0, 127);
+}
+
 #ifdef TOOLS_ENABLED
 
 void VoxelMesherBlocky::get_configuration_warnings(PackedStringArray &out_warnings) const {
@@ -881,6 +934,15 @@ void VoxelMesherBlocky::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_library", "voxel_library"), &VoxelMesherBlocky::set_library);
 	ClassDB::bind_method(D_METHOD("get_library"), &VoxelMesherBlocky::get_library);
 
+	ClassDB::bind_method(D_METHOD("set_smooth_lighting", "enabled"), &VoxelMesherBlocky::set_smooth_lighting);
+	ClassDB::bind_method(D_METHOD("get_smooth_lighting"), &VoxelMesherBlocky::get_smooth_lighting);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_sampling_trick", "enabled"), &VoxelMesherBlocky::set_shadow_sampling_trick);
+	ClassDB::bind_method(D_METHOD("get_shadow_sampling_trick"), &VoxelMesherBlocky::get_shadow_sampling_trick);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_sampling_trick_penalty", "penalty"), &VoxelMesherBlocky::set_shadow_sampling_trick_penalty);
+	ClassDB::bind_method(D_METHOD("get_shadow_sampling_trick_penalty"), &VoxelMesherBlocky::get_shadow_sampling_trick_penalty);
+
 	ClassDB::bind_method(D_METHOD("set_occlusion_enabled", "enable"), &VoxelMesherBlocky::set_occlusion_enabled);
 	ClassDB::bind_method(D_METHOD("get_occlusion_enabled"), &VoxelMesherBlocky::get_occlusion_enabled);
 
@@ -909,6 +971,7 @@ void VoxelMesherBlocky::_bind_methods() {
 			"set_library",
 			"get_library"
 	);
+
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "occlusion_enabled"), "set_occlusion_enabled", "get_occlusion_enabled");
 	ADD_PROPERTY(
 			PropertyInfo(Variant::FLOAT, "occlusion_darkness", PROPERTY_HINT_RANGE, "0,1,0.01"),
@@ -921,6 +984,12 @@ void VoxelMesherBlocky::_bind_methods() {
 			"set_tint_mode",
 			"get_tint_mode"
 	);
+    
+	ADD_GROUP("Flood Fill Lighting", "");
+
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "smooth_lighting"), "set_smooth_lighting", "get_smooth_lighting");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "_shadow_sampling_trick"), "set_shadow_sampling_trick", "get_shadow_sampling_trick");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "_shadow_sampling_trick_penalty"), "set_shadow_sampling_trick_penalty", "get_shadow_sampling_trick_penalty");
 
 	ADD_GROUP("Shadow Occluders", "shadow_occluder_");
 
