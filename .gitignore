@@ -17,3 +17,5 @@
 shaders/dev/.godot/
 *.gen.glsl
 *.gen.h
+
+.vscode/

@@ -6,6 +6,7 @@
 #include "../util/thread/mutex.h"
 #include "metadata/voxel_metadata_variant.h"
 #include "voxel_data_grid.h"
+#include <stdexcept>
 
 namespace zylann::voxel {
 
@@ -1095,7 +1096,7 @@ void VoxelData::get_missing_blocks(Box3i p_blocks_box, unsigned int lod_index, S
 	});
 }
 
-void VoxelData::get_blocks_with_voxel_data(
+bool VoxelData::get_blocks_with_voxel_data(
 		Box3i p_blocks_box,
 		unsigned int lod_index,
 		Span<std::shared_ptr<VoxelBuffer>> out_blocks
@@ -1113,15 +1114,21 @@ void VoxelData::get_blocks_with_voxel_data(
 
 	unsigned int index = 0;
 
-	p_blocks_box.for_each_cell_zxy([&index, &data_lod, &out_blocks](Vector3i data_block_pos) {
+    bool success = true;
+	p_blocks_box.for_each_cell_zxy([&index, &data_lod, &out_blocks, &success](Vector3i data_block_pos) {
 		const VoxelDataBlock *nblock = data_lod.map.get_block(data_block_pos);
 		// The block can actually be null on some occasions. Not sure yet if it's that bad
 		// CRASH_COND(nblock == nullptr);
+        if (nblock == nullptr || !nblock->has_voxels()) {
+            success = false;
+        }
 		if (nblock != nullptr && nblock->has_voxels()) {
 			out_blocks[index] = nblock->get_voxels_shared();
 		}
 		++index;
 	});
+
+    return success;
 }
 
 void VoxelData::get_blocks_grid(VoxelDataGrid &grid, Box3i box_in_voxels, unsigned int lod_index) const {
