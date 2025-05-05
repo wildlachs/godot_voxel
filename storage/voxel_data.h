@@ -290,7 +290,7 @@ public:
 	// Voxel data references are returned in an array big enough to contain a grid of the size of the area.
 	// Blocks found will be placed at an index computed as if the array was a flat grid (ZXY).
 	// Entries without voxel data will be left to null.
-	void get_blocks_with_voxel_data(
+	bool get_blocks_with_voxel_data(
 			Box3i p_blocks_box,
 			unsigned int lod_index,
 			Span<std::shared_ptr<VoxelBuffer>> out_blocks
