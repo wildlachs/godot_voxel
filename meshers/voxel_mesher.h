@@ -8,6 +8,8 @@
 #include "../util/godot/classes/image.h"
 #include "../util/godot/classes/mesh.h"
 #include "../util/macros.h"
+#include "../util/rgblight.h"
+#include <array>
 
 ZN_GODOT_FORWARD_DECLARE(class ShaderMaterial)
 
@@ -45,6 +47,11 @@ public:
 		// If true, the mesher can collect some extra information which can be useful to speed up detail texture
 		// baking. Depends on the mesher.
 		bool detail_texture_hint = false;
+
+        bool lightingEnabled = true;
+        const std::array<RGBLight, 20*20*20> lightData;
+        const int8_t lightCompressedData;
+        const int lightMinimum;
 	};
 
 	struct Output {
