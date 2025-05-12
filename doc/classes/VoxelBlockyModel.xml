@@ -60,6 +60,32 @@
 				Gets the 90-degree rotation ID that will be applied to the model when the library is baked. This is a number representing one of 24 possible 90-degree rotations. You can also use [method rotate_90].
 			</description>
 		</method>
+		<method name="set_light_color">
+			<return type="void" />
+			<param index="0" name="color" type="Color" />
+			<description>
+				Sets the color of the light the model emits. Light colors are internally rounded to rgb8 values.
+			</description>
+		</method>
+		<method name="get_light_color">
+			<return type="Color" />
+			<description>
+				Returns the color of the light the model emits. Expect loss of precision, as light colors are internally rounded to rgb8 values.
+			</description>
+		</method>
+		<method name="set_light_range">
+			<return type="void" />
+			<param index="0" name="range" type="int" />
+			<description>
+				Sets the range of the light the model emits. Valid values are from 0 to 15.
+			</description>
+		</method>
+		<method name="get_light_range">
+			<return type="int" />
+			<description>
+				Returns the range of the light the model emits.
+			</description>
+		</method>
 	</methods>
 	<members>
 		<member name="collision_aabbs" type="AABB[]" setter="set_collision_aabbs" getter="get_collision_aabbs" default="[]">
@@ -70,6 +96,12 @@
 		</member>
 		<member name="color" type="Color" setter="set_color" getter="get_color" default="Color(1, 1, 1, 1)">
 			Color of the model. It will be used to modulate its color when built into a voxel mesh.
+		</member>
+		<member name="light_color" type="Color" setter="set_light_color" getter="get_light_color" default="Color(0, 0, 0, 1)">
+			Color of the light the model emits. The color will be baked into the vertex color of the voxel mesh.
+		</member>
+		<member name="light_range" type="int" setter="set_light_range" getter="get_light_range" default="0">
+			Range of the light the model emits. Can have a value from 0 to 15.
 		</member>
 		<member name="culls_neighbors" type="bool" setter="set_culls_neighbors" getter="get_culls_neighbors" default="true">
 			If enabled, this voxel culls the faces of its neighbors. Disabling can be useful for denser transparent voxels, such as foliage.

@@ -11,6 +11,7 @@
 #include "../../util/math/vector2f.h"
 #include "../../util/math/vector3f.h"
 #include "blocky_baked_library.h"
+#include "modules/voxel/util/rgblight.h"
 
 namespace zylann::voxel {
 
@@ -49,6 +50,16 @@ public:
 	void set_color(Color color);
 	_FORCE_INLINE_ Color get_color() const {
 		return _color;
+	}
+
+	void set_light_color(Color color);
+	_FORCE_INLINE_ Color get_light_color() const {
+		return Color::from_rgba8(_light.r, _light.g, _light.b);
+	}
+
+	void set_light_range(int range);
+	int get_light_range() const {
+		return _light.range;
 	}
 
 	void set_material_override(int index, Ref<Material> material);
@@ -180,6 +191,7 @@ private:
 	bool _lod_skirts = true;
 
 	Color _color;
+	RGBLight _light;
 
 	LegacyProperties _legacy_properties;
 };

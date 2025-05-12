@@ -10,6 +10,7 @@
 #include "../../util/math/color.h"
 #include "../../util/math/vector2f.h"
 #include "../../util/math/vector3f.h"
+#include "modules/voxel/util/rgblight.h"
 
 // This is data directly consumed by the blocky mesher.
 
@@ -117,6 +118,7 @@ struct BakedModel {
 
 	Model model;
 	Color color;
+	RGBLight light;
 	uint8_t transparency_index;
 	bool culls_neighbors;
 	bool contributes_to_ao;
