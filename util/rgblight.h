@@ -11,6 +11,7 @@ struct alignas(1) RGBLight {
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
+	uint8_t range = 0;
 
     void dim(uint8_t amount, uint8_t minAmount) {
         r = (r - amount > minAmount) ? r - amount : minAmount;
@@ -28,6 +29,16 @@ struct alignas(1) RGBLight {
         uint8_t max1 = (r > g) ? r : g;
         return (max1 > b) ? max1 : b;
     }
+
+	bool operator==(const RGBLight& other) {
+		// TODO: Replace this with default spaceship operator (<=>) once we are on C++20
+		return (r == other.r) && (g == other.g) && (b == other.b) && (range == other.range);
+	}
+
+	bool operator!=(const RGBLight& other) {
+		// TODO: Replace this with default spaceship operator (<=>) once we are on C++20
+		return (r != other.r) || (g != other.g) || (b != other.b) || (range != other.range);
+	}
 };
 
 inline RGBLight sample_point_trilinear(int x, int y, int z, std::array<RGBLight, 20 * 20 * 20> lightData);

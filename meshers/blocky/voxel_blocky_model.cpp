@@ -10,6 +10,7 @@
 #include "../../util/string/format.h"
 #include "blocky_material_indexer.h"
 #include "blocky_model_baking_context.h"
+#include "core/object/object.h"
 #include "voxel_blocky_library.h"
 
 // TODO Only required because of MAX_MATERIALS... could be enough inverting that dependency
@@ -151,6 +152,26 @@ void VoxelBlockyModel::set_color(Color color) {
 	}
 }
 
+void VoxelBlockyModel::set_light_color(Color color) {
+	RGBLight light{static_cast<uint8_t>(color.get_r8()),
+				   static_cast<uint8_t>(color.get_g8()),
+				   static_cast<uint8_t>(color.get_b8()),
+				   _light.range};
+	if (light != _light) {
+		_light = light;
+		emit_changed();
+	}
+}
+
+void VoxelBlockyModel::set_light_range(int range) {
+	RGBLight light{_light.r, _light.g, _light.b,
+				   static_cast<uint8_t>(math::clamp(range, 0, 15))};
+	if (light != _light) {
+		_light = light;
+		emit_changed();
+	}
+}
+
 void VoxelBlockyModel::set_material_override(int index, Ref<Material> material) {
 	// TODO Can't check for `_surface_count` instead, because there is no guarantee about the order in which Godot will
 	// set properties when loading the resource. The mesh could be set later, so we can't know the number of surfaces.
@@ -229,6 +250,7 @@ void VoxelBlockyModel::bake(blocky::ModelBakingContext &ctx) const {
 	baked_data.transparency_index = _transparency_index;
 	baked_data.culls_neighbors = _culls_neighbors;
 	baked_data.color = _color;
+	baked_data.light = _light;
 	baked_data.is_random_tickable = _random_tickable;
 	baked_data.box_collision_mask = _collision_mask;
 	baked_data.box_collision_aabbs = _collision_aabbs;
@@ -340,6 +362,7 @@ void VoxelBlockyModel::copy_base_properties_from(const VoxelBlockyModel &src) {
 	_culls_neighbors = src._culls_neighbors;
 	_random_tickable = src._random_tickable;
 	_color = src._color;
+	_light = src._light;
 	_collision_aabbs = src._collision_aabbs;
 	_collision_mask = src._collision_mask;
 }
@@ -568,6 +591,12 @@ void VoxelBlockyModel::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_color", "color"), &VoxelBlockyModel::set_color);
 	ClassDB::bind_method(D_METHOD("get_color"), &VoxelBlockyModel::get_color);
 
+	ClassDB::bind_method(D_METHOD("set_light_color", "color"), &VoxelBlockyModel::set_light_color);
+	ClassDB::bind_method(D_METHOD("get_light_color"), &VoxelBlockyModel::get_light_color);
+
+	ClassDB::bind_method(D_METHOD("set_light_range", "range"), &VoxelBlockyModel::set_light_range);
+	ClassDB::bind_method(D_METHOD("get_light_range"), &VoxelBlockyModel::get_light_range);
+
 	ClassDB::bind_method(
 			D_METHOD("set_material_override", "index", "material"), &VoxelBlockyModel::set_material_override
 	);
@@ -610,6 +639,8 @@ void VoxelBlockyModel::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_lod_skirts_enabled"), &VoxelBlockyModel::get_lod_skirts_enabled);
 
 	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "color"), "set_color", "get_color");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "light_color", PROPERTY_HINT_COLOR_NO_ALPHA), "set_light_color", "get_light_color");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "light_range", PROPERTY_HINT_RANGE, "0,15,1"), "set_light_range", "get_light_range");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "transparency_index"), "set_transparency_index", "get_transparency_index");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "culls_neighbors"), "set_culls_neighbors", "get_culls_neighbors");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "random_tickable"), "set_random_tickable", "is_random_tickable");
