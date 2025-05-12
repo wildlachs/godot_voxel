@@ -2185,8 +2185,6 @@ class LightBlockTask : public IThreadedTask {
         int LIGHT_MIN = lightMinimum;
         const int row_size = 18;
 	    const int deck_size = 18 * 18;
-        const Vector3i min{1, 1, 1};
-        const Vector3i max{17, 17, 17};
         static const uint16_t AIR_ID = 0;
 
         // copy block data into a buffer if we don't already have it cached
@@ -2439,8 +2437,9 @@ class LightBlockTask : public IThreadedTask {
                         break;
                     }
                 }
-                if (outOfArray)
-                    continue;
+                if (outOfArray) {
+					continue;
+				}
 
                 const unsigned int test_voxel_index = testVoxel[1] + testVoxel[0] * row_size + testVoxel[2] * deck_size;
                 const unsigned int test_voxel_id = voxelIsCompressed ? voxelCompressedType : voxelDataType.get()[test_voxel_index];
@@ -2510,14 +2509,16 @@ class LightBlockTask : public IThreadedTask {
         };
         // create new LightBlockTasks to trigger updates for any blocks where data flowed out of bounds
         for (int i = 0; i < 6; ++i) {
-            if (!updatedDirections[i])
-                continue; // no light flowed out on this side
+            if (!updatedDirections[i]) {
+				continue; // no light flowed out on this side
+			}
 
             Vector3i newBlockPos = adjacentBlocks[i];
             uint32_t newBlockKey = vector3iKey(newBlockPos);
 
-            if (pendingBlocks->find(newBlockKey) == pendingBlocks->end() && lightMap->find(newBlockKey) == lightMap->end())
-                continue; // don't update this block if it's neither queued up, nor processed during a previous meshing batch
+            if (pendingBlocks->find(newBlockKey) == pendingBlocks->end() && lightMap->find(newBlockKey) == lightMap->end()) {
+				continue; // don't update this block if it's neither queued up, nor processed during a previous meshing batch
+			}
 
             if (lightCompressedMap->find(newBlockKey) != lightCompressedMap->end()) {
                 if ((*lightCompressedMap)[newBlockKey] == 1) {
@@ -2739,8 +2740,9 @@ void VoxelTerrain::process_meshing() {
                 };
                 for (Vector3i blockPos: firstPassBlocks) {
                     uint32_t blockKey = vector3iKey(blockPos);
-                    if (_lightCompressedMap[blockKey] != 0)
-                        continue; // don't trigger updates on compressed blocks
+                    if (_lightCompressedMap[blockKey] != 0) {
+						continue; // don't trigger updates on compressed blocks
+					}
 
                     RGBLight* lightData = _lightMap[blockKey];
 
@@ -2752,11 +2754,13 @@ void VoxelTerrain::process_meshing() {
 
                         uint32_t newBlockKey = vector3iKey(newBlockPos);
 
-                        if (pendingBlocks.find(newBlockKey) != pendingBlocks.end())
-                            continue; // don't trigger an update if we already processed this block in the first pass
+                        if (pendingBlocks.find(newBlockKey) != pendingBlocks.end()) {
+							continue; // don't trigger an update if we already processed this block in the first pass
+						}
 
-                        if (_lightCompressedMap.find(newBlockKey) == _lightCompressedMap.end())
-                            continue; // don't trigger an update if the adjacent block has no light data
+                        if (_lightCompressedMap.find(newBlockKey) == _lightCompressedMap.end()) {
+							continue; // don't trigger an update if the adjacent block has no light data
+						}
 
                         // initialise starting light values for the new task
                         std::vector<LightQueueItem> newStartingLight;
