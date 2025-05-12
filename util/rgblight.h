@@ -1,8 +1,11 @@
 #ifndef RGBLIGHT_H
 #define RGBLIGHT_H
 
+#include "util/math/vector3f.h"
 #include <array>
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 
 struct alignas(1) RGBLight {
     uint8_t r = 0;
@@ -151,8 +154,9 @@ inline RGBLight sample_point_trilinear(int x, int y, int z, std::array<RGBLight,
 
 				RGBLight l = lightData[index3D(nx, ny, nz, 20)];
 
-                if (l.r == 0 && l.g == 0 && l.b == 0)
-                    continue;
+                if (l.r == 0 && l.g == 0 && l.b == 0) {
+					continue;
+				}
 
 				accumR += l.r;
 				accumG += l.g;
