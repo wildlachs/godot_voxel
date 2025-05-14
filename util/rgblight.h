@@ -46,49 +46,7 @@ inline RGBLight sample_point_trilinear(int x, int y, int z, std::array<RGBLight,
 // Don't return 255, 255, 255 here, since that has a special significance inside the algorithm and behaves as sunlight
 // 0, 0, 0 means not emissive
 inline RGBLight getEmissiveColor(int typeId) {
-    if (typeId <= 16 || typeId > 32) {
-        return RGBLight{0, 0, 0};
-    }
-
-    const RGBLight emissiveColors[16] = {
-        RGBLight{239, 239, 239},    // 1
-        RGBLight{175, 15, 15},
-        RGBLight{15, 175, 15},
-        RGBLight{175, 95, 15},
-        RGBLight{15, 15, 175},
-        RGBLight{175, 15, 175},
-        RGBLight{15, 175, 175},
-        RGBLight{175, 175, 175},    // 8
-        RGBLight{95, 95, 95},
-        RGBLight{239, 95, 95},
-        RGBLight{95, 239, 95},
-        RGBLight{239, 239, 95},
-        RGBLight{95, 95, 239},
-        RGBLight{239, 95, 239},
-        RGBLight{95, 239, 239},
-        RGBLight{15, 15, 15},       // 16
-    };
-
-    // const RGBLight emissiveColors[16] = {
-    //     RGBLight{239, 239, 239},    // 1
-    //     RGBLight{95, 15, 15},
-    //     RGBLight{15, 95, 15},
-    //     RGBLight{95, 63, 15},
-    //     RGBLight{15, 15, 95},
-    //     RGBLight{95, 15, 95},
-    //     RGBLight{15, 95, 95},
-    //     RGBLight{95, 95, 95},       // 8
-    //     RGBLight{63, 63, 63},
-    //     RGBLight{127, 63, 63},
-    //     RGBLight{63, 127, 63},
-    //     RGBLight{127, 127, 63},
-    //     RGBLight{63, 63, 127},
-    //     RGBLight{127, 63, 127},
-    //     RGBLight{63, 127, 127},
-    //     RGBLight{15, 15, 15},       // 16
-    // };
-
-    return emissiveColors[typeId - 17];
+	return RGBLight{0, 0, 0};
 }
 
 inline unsigned int index3D(unsigned int x, unsigned int y, unsigned int z, unsigned int size = 18) {
