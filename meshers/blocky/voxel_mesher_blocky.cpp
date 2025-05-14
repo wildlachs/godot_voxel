@@ -78,7 +78,7 @@ void generate_mesh(
 
 	int collision_surface_index_offset = 0;
 
-	FixedArray<int, Cube::SIDE_COUNT> side_neighbor_lut;
+	FixedArray<int, Cube::SIDE_COUNT> side_neighbor_lut{};
 	side_neighbor_lut[Cube::SIDE_LEFT] = row_size;
 	side_neighbor_lut[Cube::SIDE_RIGHT] = -row_size;
 	side_neighbor_lut[Cube::SIDE_BACK] = -deck_size;
@@ -86,7 +86,7 @@ void generate_mesh(
 	side_neighbor_lut[Cube::SIDE_BOTTOM] = -1;
 	side_neighbor_lut[Cube::SIDE_TOP] = 1;
 
-	FixedArray<int, Cube::EDGE_COUNT> edge_neighbor_lut;
+	FixedArray<int, Cube::EDGE_COUNT> edge_neighbor_lut{};
 	edge_neighbor_lut[Cube::EDGE_BOTTOM_BACK] =
 			side_neighbor_lut[Cube::SIDE_BOTTOM] + side_neighbor_lut[Cube::SIDE_BACK];
 	edge_neighbor_lut[Cube::EDGE_BOTTOM_FRONT] =
@@ -105,7 +105,7 @@ void generate_mesh(
 	edge_neighbor_lut[Cube::EDGE_TOP_LEFT] = side_neighbor_lut[Cube::SIDE_TOP] + side_neighbor_lut[Cube::SIDE_LEFT];
 	edge_neighbor_lut[Cube::EDGE_TOP_RIGHT] = side_neighbor_lut[Cube::SIDE_TOP] + side_neighbor_lut[Cube::SIDE_RIGHT];
 
-	FixedArray<int, Cube::CORNER_COUNT> corner_neighbor_lut;
+	FixedArray<int, Cube::CORNER_COUNT> corner_neighbor_lut{};
 
 	corner_neighbor_lut[Cube::CORNER_BOTTOM_BACK_LEFT] = side_neighbor_lut[Cube::SIDE_BOTTOM] +
 			side_neighbor_lut[Cube::SIDE_BACK] + side_neighbor_lut[Cube::SIDE_LEFT];

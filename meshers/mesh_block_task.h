@@ -77,10 +77,10 @@ public:
 	std::shared_ptr<MeshingDependency> meshing_dependency;
 	std::shared_ptr<VoxelData> data;
 
-    bool lightingEnabled;
+    bool lightingEnabled = false;
     std::array<RGBLight, 20*20*20> lightData;
     int8_t lightCompressedData = 0;
-    int lightMinimum;
+    int lightMinimum = 0;
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 	DetailRenderingSettings detail_texture_settings;

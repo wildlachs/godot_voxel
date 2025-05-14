@@ -49,9 +49,8 @@ public:
 		bool detail_texture_hint = false;
 
         bool lightingEnabled = true;
-        const std::array<RGBLight, 20*20*20> lightData;
-        const int8_t lightCompressedData;
-        const int lightMinimum;
+        const std::array<RGBLight, 20*20*20> lightData{};
+        const int lightMinimum = 15;
 	};
 
 	struct Output {
