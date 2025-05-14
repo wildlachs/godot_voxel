@@ -15,6 +15,7 @@
 #include "voxel_mesh_block_vt.h"
 #include "voxel_terrain_multiplayer_synchronizer.h"
 #include "../../util/godot/classes/file_access.h"
+#include <unordered_set>
 
 #ifdef TOOLS_ENABLED
 #include "../../util/godot/debug_renderer.h"
@@ -46,12 +47,8 @@ public:
 	VoxelTerrain();
 	~VoxelTerrain();
 
-    // light data
     std::unordered_map<uint32_t, RGBLight*> _lightMap;
-    // 1: light compressed and full sun
-    // 0: no compression
-    // -1: light compressed and no sun
-    std::unordered_map<uint32_t, int8_t> _lightCompressedMap;
+	std::unordered_set<uint32_t> _lightProcessed;
 
     bool _lighting_enabled = true;
     void set_lighting_enabled(bool enabled);

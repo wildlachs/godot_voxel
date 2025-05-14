@@ -516,7 +516,6 @@ void MeshBlockTask::build_mesh() {
 		true, // detail_texture_hint
         lightingEnabled,
         lightData,
-        lightCompressedData,
         lightMinimum
 	};
 	mesher->build(_surfaces_output, input);
