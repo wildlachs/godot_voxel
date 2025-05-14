@@ -2048,16 +2048,6 @@ bool VoxelTerrain::has_data_block(Vector3i position) const {
 	return _data->has_block(position, 0);
 }
 
-constexpr bool ENABLE_MYPRINTF = false;
-void myprintf(const char* format, ...) {
-    if constexpr (ENABLE_MYPRINTF) {
-        va_list args;
-        va_start(args, format);
-        vprintf(format, args);
-        va_end(args);
-    }
-}
-
 struct LightQueueItem {
     RGBLight light;
     unsigned int x;
@@ -2075,16 +2065,6 @@ uint32_t vector3iKey(Vector3i v) {
     // return 2147483647 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
     // return 1000000000 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
     return 1000 * 1000 * (v.x + 1000) + 1000 * (v.y + 1000) + (v.z + 1000);
-}
-
-Vector3i reverseVector3iKey(uint32_t key) {
-    int32_t k = key;
-
-    int x = (k / 1000000) - 1000;
-    int y = ((k % 1000000) / 1000) - 1000;
-    int z = (k % 1000) - 1000;
-
-    return Vector3i(x, y, z);
 }
 
 std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<uint32_t, RGBLight*> *lightMap, std::unordered_map<uint32_t, int8_t> *lightCompressedMap, bool sunlightEnabled) {
@@ -2192,7 +2172,6 @@ class LightBlockTask : public IThreadedTask {
         int16_t voxelCompressedType;
         bool voxelIsCompressed = false;
         if (voxelCompressedCache->find(blockKey) != voxelCompressedCache->end()) {
-            myprintf("already have");
             voxelCompressedType = (*voxelCompressedCache)[blockKey];
             if (voxelCompressedType == -1) {
                 voxelDataType = (*voxelDataCache)[blockKey];
@@ -2404,7 +2383,6 @@ class LightBlockTask : public IThreadedTask {
         const int iterationsLimit = 999999;
         while (!tasks.empty()) {
             if (++iterations >= iterationsLimit) {
-                myprintf("iteration limit exceeded, something probably went wrong\n");
                 break;
             }
 
@@ -2599,8 +2577,6 @@ class LightBlockTask : public IThreadedTask {
                 secondPassTasks->push_back(task);
             }
         }
-
-        myprintf("(%d, %d, %d) finished\n", blockPos.x, blockPos.y, blockPos.z);
     }
 };
 
