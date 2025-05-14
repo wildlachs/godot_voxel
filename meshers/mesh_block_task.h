@@ -79,7 +79,6 @@ public:
 
     bool lightingEnabled = false;
     std::array<RGBLight, 20*20*20> lightData;
-    int8_t lightCompressedData = 0;
     int lightMinimum = 0;
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING

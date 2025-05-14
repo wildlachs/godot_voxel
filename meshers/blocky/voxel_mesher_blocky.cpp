@@ -46,7 +46,6 @@ void generate_mesh(
 		const TintSampler tint_sampler,
         const bool lightingEnabled,
         const std::array<RGBLight, 20*20*20> &lightData,
-        const int8_t lightCompressedData,
         const int lightMinimum,
         const bool _shadow_sampling_trick,
         const int _shadow_sampling_trick_penalty,
@@ -371,17 +370,11 @@ void generate_mesh(
                                     // vertex_pos - position of vertex (0 to 1)
                                     // side_normal - normal vector
                                     RGBLight l;
-                                    if (lightCompressedData == 1) {
-                                        l = RGBLight{255, 255, 255};
-                                    } else if (lightCompressedData == -1) {
-                                        l = RGBLight{0, 0, 0};
-                                    } else {
-                                        if (_smooth_lighting) {
-                                            l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
-                                        } else {
-                                            l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
-                                        }
-                                    }
+									if (_smooth_lighting) {
+										l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+									} else {
+										l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+									}
                                     w[i] = Color(float(l.r) / 255., float(l.g) / 255., float(l.b) / 255.);
                                 } else {
                                     w[i] = Color(1.0, 1.0, 1.0);
@@ -480,17 +473,11 @@ void generate_mesh(
                             // vertex_pos - position of vertex (0 to 1)
                             // side_normal - normal vector
                             RGBLight l;
-                            if (lightCompressedData == 1) {
-                                l = RGBLight{255, 255, 255};
-                            } else if (lightCompressedData == -1) {
-                                l = RGBLight{0, 0, 0};
-                            } else {
-                                if (_smooth_lighting) {
-                                    l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
-                                } else {
-                                    l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
-                                }
-                            }
+							if (_smooth_lighting) {
+								l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+							} else {
+								l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+							}
                             c = Color(float(l.r) / 255., float(l.g) / 255., float(l.b) / 255.);
                         } else {
                             c = Color(1.0, 1.0, 1.0);
@@ -715,7 +702,6 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						tint_sampler,
                         input.lightingEnabled,
                         input.lightData,
-                        input.lightCompressedData,
                         input.lightMinimum,
                         _shadow_sampling_trick,
                         _shadow_sampling_trick_penalty,
@@ -741,7 +727,6 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						tint_sampler,
                         input.lightingEnabled,
                         input.lightData,
-                        input.lightCompressedData,
                         input.lightMinimum,
                         _shadow_sampling_trick,
                         _shadow_sampling_trick_penalty,
@@ -1011,7 +996,7 @@ void VoxelMesherBlocky::_bind_methods() {
 			"set_tint_mode",
 			"get_tint_mode"
 	);
-    
+
 	ADD_GROUP("Flood Fill Lighting", "");
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "smooth_lighting"), "set_smooth_lighting", "get_smooth_lighting");
