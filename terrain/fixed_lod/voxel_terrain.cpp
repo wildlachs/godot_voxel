@@ -2624,249 +2624,242 @@ void VoxelTerrain::process_meshing() {
     bool performLighting = !Engine::get_singleton()->is_editor_hint() && _lighting_enabled;
 
     if (performLighting) {
-        if (_use_baked_light && !_performed_initial_light_load) {
-            loadLightData();
-            _performed_initial_light_load = true;
-        }
+		std::vector<Vector3i> firstPassBlocks;
 
-        if (_calculate_light) {
-            std::vector<Vector3i> firstPassBlocks;
+		std::unordered_set<Vector3i> blocksToRemesh;
 
-            std::unordered_set<Vector3i> blocksToRemesh;
+		// index these with vector3iKey(Vector3i)
+		std::unordered_map<uint32_t, std::mutex> pendingBlocks;
+		std::unordered_map<uint32_t, std::mutex> firstPassMutex;
+		std::unordered_map<uint32_t, std::condition_variable> firstPassCV;
+		std::unordered_map<uint32_t, bool> firstPassBool;
+		std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> voxelDataCache;
+		std::unordered_map<uint32_t, int16_t> voxelCompressedCache;
+		if (_blocks_pending_update.size() > 0) {
+			// keep track of which blocks are pending
+			for (size_t bi = 0; bi < _blocks_pending_update.size(); ++bi) {
+				const Vector3i mesh_block_pos = _blocks_pending_update[bi];
+				uint32_t key = vector3iKey(mesh_block_pos);
+				if (_lightCompressedMap.find(key) != _lightCompressedMap.end()) {
+					// we already processed this block, don't do it again
+					continue;
+				}
 
-            // index these with vector3iKey(Vector3i)
-            std::unordered_map<uint32_t, std::mutex> pendingBlocks;
-            std::unordered_map<uint32_t, std::mutex> firstPassMutex;
-            std::unordered_map<uint32_t, std::condition_variable> firstPassCV;
-            std::unordered_map<uint32_t, bool> firstPassBool;
-            std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> voxelDataCache;
-            std::unordered_map<uint32_t, int16_t> voxelCompressedCache;
-            if (_blocks_pending_update.size() > 0) {
-                // keep track of which blocks are pending
-                for (size_t bi = 0; bi < _blocks_pending_update.size(); ++bi) {
-                    const Vector3i mesh_block_pos = _blocks_pending_update[bi];
-                    uint32_t key = vector3iKey(mesh_block_pos);
-                    if (_lightCompressedMap.find(key) != _lightCompressedMap.end()) {
-                        // we already processed this block, don't do it again
-                        continue;
-                    }
+				firstPassBlocks.push_back(mesh_block_pos);
+				blocksToRemesh.insert(mesh_block_pos);
+			}
 
-                    firstPassBlocks.push_back(mesh_block_pos);
-                    blocksToRemesh.insert(mesh_block_pos);
-                }
+			for (Vector3i blockPos: firstPassBlocks) {
+				uint32_t key = vector3iKey(blockPos);
+				pendingBlocks.try_emplace(key);
+				firstPassMutex.try_emplace(key);
+				firstPassCV.try_emplace(key);
+				firstPassBool.try_emplace(false);
+			}
 
-                for (Vector3i blockPos: firstPassBlocks) {
-                    uint32_t key = vector3iKey(blockPos);
-                    pendingBlocks.try_emplace(key);
-                    firstPassMutex.try_emplace(key);
-                    firstPassCV.try_emplace(key);
-                    firstPassBool.try_emplace(false);
-                }
+			std::mutex tempLock; // make the threads entirely synchronous
+			std::vector<LightBlockTask*> secondPassTasks;
 
-                std::mutex tempLock; // make the threads entirely synchronous
-                std::vector<LightBlockTask*> secondPassTasks;
+			// process light for each block
+			for (Vector3i blockPos: firstPassBlocks) {
+				uint32_t key = vector3iKey(blockPos);
 
-                // process light for each block
-                for (Vector3i blockPos: firstPassBlocks) {
-                    uint32_t key = vector3iKey(blockPos);
+				bool compressedLight = false;
+				std::vector<LightQueueItem> startingLight;
+				if (_sunlight_enabled && blockPos.y >= _sunlight_y_level) {
+					compressedLight = true; // top starts off with sunlight
+				}
 
-                    bool compressedLight = false;
-                    std::vector<LightQueueItem> startingLight;
-                    if (_sunlight_enabled && blockPos.y >= _sunlight_y_level) {
-                        compressedLight = true; // top starts off with sunlight
-                    }
+				if (_lightMap.find(key) == _lightMap.end()) {
+					// initialise light data for that block, if it doesn't exist
+					RGBLight *lightData = new RGBLight[18 * 18 * 18];
+					for (int i = 0; i < 18; i++) {
+						for (int j = 0; j < 18; j++) {
+							for (int k = 0; k < 18; k++) {
+								lightData[index3D(i, j, k)] = RGBLight{0, 0, 0};
+							}
+						}
+					}
+					_lightMap[key] = lightData;
 
-                    if (_lightMap.find(key) == _lightMap.end()) {
-                        // initialise light data for that block, if it doesn't exist
-                        RGBLight *lightData = new RGBLight[18 * 18 * 18];
-                        for (int i = 0; i < 18; i++) {
-                            for (int j = 0; j < 18; j++) {
-                                for (int k = 0; k < 18; k++) {
-                                    lightData[index3D(i, j, k)] = RGBLight{0, 0, 0};
-                                }
-                            }
-                        }
-                        _lightMap[key] = lightData;
+					LightBlockTask *task = ZN_NEW(LightBlockTask);
+					task->compressedLight = compressedLight;
+					task->blockPos = blockPos;
+					task->lightData = lightData;
+					task->pendingBlocks = &pendingBlocks;
+					task->lightMap = &_lightMap;
+					task->lightCompressedMap = &_lightCompressedMap;
+					task->mesh_to_data_factor = mesh_to_data_factor;
+					task->_data = _data;
+					task->_mesher = get_mesher();
+					task->_generator = get_generator();
+					task->tempLock = &tempLock;
+					task->secondPassTasks = &secondPassTasks;
+					task->blocksToRemesh = &blocksToRemesh;
+					task->lightDecay = _light_decay;
+					task->lightMinimum = _light_minimum;
+					task->voxelDataCache = &voxelDataCache;
+					task->voxelCompressedCache = &voxelCompressedCache;
+					scheduler.push_main_task(task);
+				}
+			}
 
-                        LightBlockTask *task = ZN_NEW(LightBlockTask);
-                        task->compressedLight = compressedLight;
-                        task->blockPos = blockPos;
-                        task->lightData = lightData;
-                        task->pendingBlocks = &pendingBlocks;
-                        task->lightMap = &_lightMap;
-                        task->lightCompressedMap = &_lightCompressedMap;
-                        task->mesh_to_data_factor = mesh_to_data_factor;
-                        task->_data = _data;
-                        task->_mesher = get_mesher();
-                        task->_generator = get_generator();
-                        task->tempLock = &tempLock;
-                        task->secondPassTasks = &secondPassTasks;
-                        task->blocksToRemesh = &blocksToRemesh;
-                        task->lightDecay = _light_decay;
-                        task->lightMinimum = _light_minimum;
-                        task->voxelDataCache = &voxelDataCache;
-                        task->voxelCompressedCache = &voxelCompressedCache;
-                        scheduler.push_main_task(task);
-                    }
-                }
+			scheduler.flush();
+			VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
 
-                scheduler.flush();
-                VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
+			// send updates from any adjacent (6-directional) blocks to those processed, using the precomputed light edge data
+			Vector3i adjacentBlockOffset[6] = {
+				Vector3i(-1, 0, 0),
+				Vector3i(1, 0, 0),
+				Vector3i(0, -1, 0),
+				Vector3i(0, 1, 0),
+				Vector3i(0, 0, -1),
+				Vector3i(0, 0, 1),
+			};
+			Vector3i mins[6] = {
+				Vector3i(16, 1, 1),
+				Vector3i(1, 1, 1),
+				Vector3i(1, 16, 1),
+				Vector3i(1, 1, 1),
+				Vector3i(1, 1, 16),
+				Vector3i(1, 1, 1),
+			};
+			Vector3i maxs[6] = { // inclusive
+				Vector3i(16, 16, 16),
+				Vector3i(1, 16, 16),
+				Vector3i(16, 16, 16),
+				Vector3i(16, 1, 16),
+				Vector3i(16, 16, 16),
+				Vector3i(16, 16, 1),
+			};
+			for (Vector3i blockPos: firstPassBlocks) {
+				uint32_t blockKey = vector3iKey(blockPos);
+				if (_lightCompressedMap[blockKey] != 0) {
+					continue; // don't trigger updates on compressed blocks
+				}
 
-                // send updates from any adjacent (6-directional) blocks to those processed, using the precomputed light edge data
-                Vector3i adjacentBlockOffset[6] = {
-                    Vector3i(-1, 0, 0),
-                    Vector3i(1, 0, 0),
-                    Vector3i(0, -1, 0),
-                    Vector3i(0, 1, 0),
-                    Vector3i(0, 0, -1),
-                    Vector3i(0, 0, 1),
-                };
-                Vector3i mins[6] = {
-                    Vector3i(16, 1, 1),
-                    Vector3i(1, 1, 1),
-                    Vector3i(1, 16, 1),
-                    Vector3i(1, 1, 1),
-                    Vector3i(1, 1, 16),
-                    Vector3i(1, 1, 1),
-                };
-                Vector3i maxs[6] = { // inclusive
-                    Vector3i(16, 16, 16),
-                    Vector3i(1, 16, 16),
-                    Vector3i(16, 16, 16),
-                    Vector3i(16, 1, 16),
-                    Vector3i(16, 16, 16),
-                    Vector3i(16, 16, 1),
-                };
-                for (Vector3i blockPos: firstPassBlocks) {
-                    uint32_t blockKey = vector3iKey(blockPos);
-                    if (_lightCompressedMap[blockKey] != 0) {
-						continue; // don't trigger updates on compressed blocks
+				RGBLight* lightData = _lightMap[blockKey];
+
+				for (int d = 0; d < 6; ++d) {
+					Vector3i newBlockPos = blockPos + adjacentBlockOffset[d];
+					Vector3i min = mins[d];
+					Vector3i max = maxs[d];
+					Vector3i voxOffset = 16 * adjacentBlockOffset[d];
+
+					uint32_t newBlockKey = vector3iKey(newBlockPos);
+
+					if (pendingBlocks.find(newBlockKey) != pendingBlocks.end()) {
+						continue; // don't trigger an update if we already processed this block in the first pass
 					}
 
-                    RGBLight* lightData = _lightMap[blockKey];
+					if (_lightCompressedMap.find(newBlockKey) == _lightCompressedMap.end()) {
+						continue; // don't trigger an update if the adjacent block has no light data
+					}
 
-                    for (int d = 0; d < 6; ++d) {
-                        Vector3i newBlockPos = blockPos + adjacentBlockOffset[d];
-                        Vector3i min = mins[d];
-                        Vector3i max = maxs[d];
-                        Vector3i voxOffset = 16 * adjacentBlockOffset[d];
+					// initialise starting light values for the new task
+					std::vector<LightQueueItem> newStartingLight;
 
-                        uint32_t newBlockKey = vector3iKey(newBlockPos);
+					int8_t lightCompressed = _lightCompressedMap[newBlockKey];
+					RGBLight* adjacentLightData; // may be unset if light is compressed
+					if (lightCompressed == 0) { // light is not compressed
+						adjacentLightData = _lightMap[newBlockKey];
+					}
 
-                        if (pendingBlocks.find(newBlockKey) != pendingBlocks.end()) {
-							continue; // don't trigger an update if we already processed this block in the first pass
+					for (int x = min.x; x <= max.x; ++x) {
+						for (int y = min.y; y <= max.y; ++y) {
+							for (int z = min.z; z <= max.z; ++z) {
+								Vector3i voxPos{x, y, z}; // position in the sampled new block
+								Vector3i transformedVoxPos = voxPos + voxOffset; // voxPos transformed back to the original block
+
+								if (lightCompressed == 0) { // light is not compressed
+									RGBLight lightValueAdjacent = adjacentLightData[index3D(voxPos.x, voxPos.y, voxPos.z)];
+									RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
+									if (lightValueAdjacent.r > 0 && lightValueAdjacent.g > 0 && lightValueAdjacent.b > 0) {
+										// make sure this blends rather than overwriting existing values
+										if (lightValueAdjacent.r > lightValueHere.r || lightValueAdjacent.g > lightValueHere.g || lightValueAdjacent.b > lightValueHere.b) {
+											lightValueHere.blendMax(lightValueAdjacent);
+											LightQueueItem item{lightValueHere,
+												static_cast<unsigned>(transformedVoxPos.x),
+												static_cast<unsigned>(transformedVoxPos.y),
+												static_cast<unsigned>(transformedVoxPos.z)
+											};
+											newStartingLight.push_back(item);
+
+											uint32_t finalIndex = index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z);
+											lightData[finalIndex] = lightValueHere;
+										}
+									}
+								} else { // light is compressed
+									if (lightCompressed == 1) {
+										// don't create an item if there is already sunlight in the local block
+										RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
+										if (lightValueHere.r < 255 || lightValueHere.g < 255 || lightValueHere.b < 255) {
+											LightQueueItem item{RGBLight{255, 255, 255},
+												static_cast<unsigned>(transformedVoxPos.x),
+												static_cast<unsigned>(transformedVoxPos.y),
+												static_cast<unsigned>(transformedVoxPos.z)};
+											newStartingLight.push_back(item);
+										}
+									}
+								}
+							}
 						}
+					}
 
-                        if (_lightCompressedMap.find(newBlockKey) == _lightCompressedMap.end()) {
-							continue; // don't trigger an update if the adjacent block has no light data
-						}
+					// only spawn a task if there would be more than 0 updates
+					if (newStartingLight.size() > 0) {
+						LightBlockTask *task = ZN_NEW(LightBlockTask);
+						task->startingLight = newStartingLight;
+						task->compressedLight = false;
+						task->blockPos = blockPos;
+						task->lightData = lightData;
+						task->pendingBlocks = &pendingBlocks;
+						task->lightMap = &_lightMap;
+						task->lightCompressedMap = &_lightCompressedMap;
+						task->originBlock = blockPos;
+						task->mesh_to_data_factor = mesh_to_data_factor;
+						task->_data = _data;
+						task->_mesher = get_mesher();
+						task->_generator = get_generator();
+						task->tempLock = &tempLock;
+						task->secondPassTasks = &secondPassTasks;
+						task->blocksToRemesh = &blocksToRemesh;
+						task->lightDecay = _light_decay;
+						task->lightMinimum = _light_minimum;
+						task->voxelDataCache = &voxelDataCache;
+						task->voxelCompressedCache = &voxelCompressedCache;
 
-                        // initialise starting light values for the new task
-                        std::vector<LightQueueItem> newStartingLight;
+						secondPassTasks.push_back(task);
+					}
+				}
+			}
 
-                        int8_t lightCompressed = _lightCompressedMap[newBlockKey];
-                        RGBLight* adjacentLightData; // may be unset if light is compressed
-                        if (lightCompressed == 0) { // light is not compressed
-                            adjacentLightData = _lightMap[newBlockKey];
-                        }
+			for (LightBlockTask *task: secondPassTasks) {
+				scheduler.push_main_task(task);
+			}
+			scheduler.flush();
+			VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
+		}
 
-                        for (int x = min.x; x <= max.x; ++x) {
-                            for (int y = min.y; y <= max.y; ++y) {
-                                for (int z = min.z; z <= max.z; ++z) {
-                                    Vector3i voxPos{x, y, z}; // position in the sampled new block
-                                    Vector3i transformedVoxPos = voxPos + voxOffset; // voxPos transformed back to the original block
+		for (const Vector3i &blockPos: blocksToRemesh) {
+			// add them to _blocks_pending_update if they aren't already in the list, to stop everything from falling apart
+			VoxelMeshBlockVT *mesh_block = _mesh_map.get_block(blockPos);
 
-                                    if (lightCompressed == 0) { // light is not compressed
-                                        RGBLight lightValueAdjacent = adjacentLightData[index3D(voxPos.x, voxPos.y, voxPos.z)];
-                                        RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
-                                        if (lightValueAdjacent.r > 0 && lightValueAdjacent.g > 0 && lightValueAdjacent.b > 0) {
-                                            // make sure this blends rather than overwriting existing values
-                                            if (lightValueAdjacent.r > lightValueHere.r || lightValueAdjacent.g > lightValueHere.g || lightValueAdjacent.b > lightValueHere.b) {
-                                                lightValueHere.blendMax(lightValueAdjacent);
-                                                LightQueueItem item{lightValueHere,
-                                                    static_cast<unsigned>(transformedVoxPos.x),
-                                                    static_cast<unsigned>(transformedVoxPos.y),
-                                                    static_cast<unsigned>(transformedVoxPos.z)
-                                                };
-                                                newStartingLight.push_back(item);
+			// some of these blocks will already be added to the pending list, so ignore those
+			if (mesh_block != nullptr && !mesh_block->is_in_update_list) {
+				// from try_schedule_mesh_update
+				const int render_to_data_factor = get_mesh_block_size() / get_data_block_size();
 
-                                                uint32_t finalIndex = index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z);
-                                                lightData[finalIndex] = lightValueHere;
-                                            }
-                                        }
-                                    } else { // light is compressed
-                                        if (lightCompressed == 1) {
-                                            // don't create an item if there is already sunlight in the local block
-                                            RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
-                                            if (lightValueHere.r < 255 || lightValueHere.g < 255 || lightValueHere.b < 255) {
-                                                LightQueueItem item{RGBLight{255, 255, 255},
-                                                    static_cast<unsigned>(transformedVoxPos.x),
-                                                    static_cast<unsigned>(transformedVoxPos.y),
-                                                    static_cast<unsigned>(transformedVoxPos.z)};
-                                                newStartingLight.push_back(item);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+				const Box3i data_box =
+						Box3i(mesh_block->position * render_to_data_factor, Vector3iUtil::create(render_to_data_factor)).padded(1);
 
-                        // only spawn a task if there would be more than 0 updates
-                        if (newStartingLight.size() > 0) {
-                            LightBlockTask *task = ZN_NEW(LightBlockTask);
-                            task->startingLight = newStartingLight;
-                            task->compressedLight = false;
-                            task->blockPos = blockPos;
-                            task->lightData = lightData;
-                            task->pendingBlocks = &pendingBlocks;
-                            task->lightMap = &_lightMap;
-                            task->lightCompressedMap = &_lightCompressedMap;
-                            task->originBlock = blockPos;
-                            task->mesh_to_data_factor = mesh_to_data_factor;
-                            task->_data = _data;
-                            task->_mesher = get_mesher();
-                            task->_generator = get_generator();
-                            task->tempLock = &tempLock;
-                            task->secondPassTasks = &secondPassTasks;
-                            task->blocksToRemesh = &blocksToRemesh;
-                            task->lightDecay = _light_decay;
-                            task->lightMinimum = _light_minimum;
-                            task->voxelDataCache = &voxelDataCache;
-                            task->voxelCompressedCache = &voxelCompressedCache;
+				const bool data_available = _data->has_all_blocks_in_area(data_box, 0);
 
-                            secondPassTasks.push_back(task);
-                        }
-                    }
-                }
-
-                for (LightBlockTask *task: secondPassTasks) {
-                    scheduler.push_main_task(task);
-                }
-                scheduler.flush();
-                VoxelEngine::get_singleton().wait_and_clear_all_tasks(false);
-            }
-
-            for (const Vector3i &blockPos: blocksToRemesh) {
-                // add them to _blocks_pending_update if they aren't already in the list, to stop everything from falling apart
-                VoxelMeshBlockVT *mesh_block = _mesh_map.get_block(blockPos);
-
-                // some of these blocks will already be added to the pending list, so ignore those
-                if (mesh_block != nullptr && !mesh_block->is_in_update_list) {
-                    // from try_schedule_mesh_update
-                    const int render_to_data_factor = get_mesh_block_size() / get_data_block_size();
-
-                    const Box3i data_box =
-                            Box3i(mesh_block->position * render_to_data_factor, Vector3iUtil::create(render_to_data_factor)).padded(1);
-
-                    const bool data_available = _data->has_all_blocks_in_area(data_box, 0);
-
-                    if (data_available) { // prevents crashes
-                        mesh_block->is_in_update_list = true;
-                        _blocks_pending_update.push_back(mesh_block->position);
-                    }
-                }
-            }
+				if (data_available) { // prevents crashes
+					mesh_block->is_in_update_list = true;
+					_blocks_pending_update.push_back(mesh_block->position);
+				}
+			}
         }
     }
 
@@ -2968,153 +2961,9 @@ void VoxelTerrain::process_meshing() {
 	// String::num(_block_update_queue.size()));
 }
 
-void VoxelTerrain::loadLightData() {
-    ERR_FAIL_COND(_light_directory == "");
-
-    Error err;
-    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
-    if (dir.is_null()) {
-        ERR_PRINT(String("Could not load light data from {0}").format(varray(_light_directory)));
-        return;
-    }
-
-    dir->list_dir_begin();
-    String file_name = dir->get_next();
-    while (!file_name.is_empty()) {
-        if (!dir->current_is_dir()) {
-            String filePath = _light_directory.path_join(file_name);
-
-            Error err2;
-            Ref<FileAccess> f = zylann::godot::open_file(filePath, FileAccess::READ, err2);
-            if (f.is_null()) {
-                ERR_PRINT(String("Could not read file"));
-                return;
-            }
-
-            // first 12 bytes are x, y, z coords of the block
-            int32_t blockX = static_cast<int32_t>(f->get_32());
-            int32_t blockY = static_cast<int32_t>(f->get_32());
-            int32_t blockZ = static_cast<int32_t>(f->get_32());
-            Vector3i blockPos{blockX, blockY, blockZ};
-            uint32_t blockKey = vector3iKey(blockPos);
-
-            // remainder of file will either contain 1 byte (compressed) or 18*18*18*3 bytes
-            uint64_t length = f->get_length();
-            if (length == 4*3 + 1) { // compressed
-                int8_t value = static_cast<int8_t>(f->get_8());
-                _lightCompressedMap[blockKey] = value;
-            } else { // uncompressed
-                ZN_ASSERT(length == 4*3 + 18*18*18*3);
-
-                RGBLight *lightData = new RGBLight[18*18*18];
-                for (int i = 0; i < 18; i++) {
-                    for (int j = 0; j < 18; j++) {
-                        for (int k = 0; k < 18; k++) {
-                            uint8_t r = f->get_8();
-                            uint8_t g = f->get_8();
-                            uint8_t b = f->get_8();
-                            lightData[index3D(i, j, k)] = RGBLight{r, g, b};
-                        }
-                    }
-                }
-
-                _lightCompressedMap[blockKey] = 0;
-                _lightMap[blockKey] = lightData;
-            }
-        }
-        file_name = dir->get_next();
-    }
-    dir->list_dir_end();
-}
-
-void VoxelTerrain::saveLightData() {
-	ERR_FAIL_COND(_light_directory == "");
-
-    for (const std::pair<const uint32_t, int8_t>& entry: _lightCompressedMap) {
-        uint32_t blockKey = entry.first;
-        std::string ext = ".bin";
-        String filePath = _light_directory.path_join((std::to_string(blockKey) + ext).c_str());
-
-        Error err;
-        Ref<FileAccess> f = zylann::godot::open_file(filePath, FileAccess::WRITE, err);
-        if (f.is_null()) {
-            ERR_PRINT(String("Could not save light data to {0}").format(varray(_light_directory)));
-            return;
-        }
-
-        Vector3i blockPos = reverseVector3iKey(blockKey);
-        int32_t blockX = static_cast<int32_t>(blockPos.x);
-        int32_t blockY = static_cast<int32_t>(blockPos.y);
-        int32_t blockZ = static_cast<int32_t>(blockPos.z);
-        f->store_32(blockX);
-        f->store_32(blockY);
-        f->store_32(blockZ);
-
-        int8_t compressedLightValue = entry.second;
-
-        if (compressedLightValue == 0) { // light is not compressed
-            RGBLight* lightData = _lightMap[blockKey];
-            int size = 18 * 18 * 18 * 3; // TODO: I should really save the 20x20x20 arrays in lightMap...
-            f->store_buffer(reinterpret_cast<const uint8_t*>(lightData), size);
-            // printf("Saved block (%d) of size %d\n", blockKey, size);
-        } else {
-            f->store_8(static_cast<int8_t>(compressedLightValue));
-            // printf("Saved block (%d) [compressed %d]\n", blockKey, compressedLightValue);
-        }
-        f->close();
-    }
-}
-
-void VoxelTerrain::deleteAllLightData() {
-    ERR_FAIL_COND(_light_directory == "");
-
-    Error err;
-    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
-    if (dir.is_null()) {
-        ERR_PRINT(String("Could not access {0}").format(varray(_light_directory)));
-        return;
-    }
-
-    dir->erase_contents_recursive();
-}
-
-void VoxelTerrain::deleteLightData(int x, int y, int z, int radius) {
-    ERR_FAIL_COND(_light_directory == "");
-
-    Error err;
-    Ref<DirAccess> dir = zylann::godot::open_dir(_light_directory, err);
-    if (dir.is_null()) {
-        ERR_PRINT(String("Could not load light data from {0}").format(varray(_light_directory)));
-        return;
-    }
-
-    for (int i = x - radius; i <= x + radius; i++) {
-        for (int j = y - radius; j <= y + radius; j++) {
-            for (int k = z - radius; k <= z + radius; k++) {
-                uint32_t blockKey = vector3iKey(Vector3i(i, j, k));
-                std::string ext = ".bin";
-                String fileName((std::to_string(blockKey) + ext).c_str());
-
-                dir->remove(fileName);
-            }
-        }
-    }
-}
 
 void VoxelTerrain::set_lighting_enabled(bool enabled) {
 	_lighting_enabled = enabled;
-}
-
-void VoxelTerrain::set_calculate_light(bool enabled) {
-	_calculate_light = enabled;
-}
-
-void VoxelTerrain::set_use_baked_light(bool enabled) {
-	_use_baked_light = enabled;
-}
-
-void VoxelTerrain::set_light_directory(String directory) {
-	_light_directory = directory;
 }
 
 void VoxelTerrain::set_sunlight_enabled(bool enabled) {
@@ -3592,15 +3441,6 @@ void VoxelTerrain::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_lighting_enabled", "enabled"), &Self::set_lighting_enabled);
 	ClassDB::bind_method(D_METHOD("get_lighting_enabled"), &Self::get_lighting_enabled);
 
-	ClassDB::bind_method(D_METHOD("set_calculate_light", "enabled"), &Self::set_calculate_light);
-	ClassDB::bind_method(D_METHOD("get_calculate_light"), &Self::get_calculate_light);
-
-	ClassDB::bind_method(D_METHOD("set_use_baked_light", "enabled"), &Self::set_use_baked_light);
-	ClassDB::bind_method(D_METHOD("get_use_baked_light"), &Self::get_use_baked_light);
-
-	ClassDB::bind_method(D_METHOD("set_light_directory", "directory"), &Self::set_light_directory);
-	ClassDB::bind_method(D_METHOD("get_light_directory"), &Self::get_light_directory);
-
 	ClassDB::bind_method(D_METHOD("set_sunlight_enabled", "enabled"), &Self::set_sunlight_enabled);
 	ClassDB::bind_method(D_METHOD("get_sunlight_enabled"), &Self::get_sunlight_enabled);
 
@@ -3612,10 +3452,6 @@ void VoxelTerrain::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_light_minimum", "minimum"), &Self::set_light_minimum);
 	ClassDB::bind_method(D_METHOD("get_light_minimum"), &Self::get_light_minimum);
-
-	ClassDB::bind_method(D_METHOD("save_light_data"), &Self::saveLightData);
-	ClassDB::bind_method(D_METHOD("delete_all_light_data"), &Self::deleteAllLightData);
-	ClassDB::bind_method(D_METHOD("delete_light_data", "x", "y", "z", "radius"), &Self::deleteLightData);
 
 	ClassDB::bind_method(D_METHOD("set_material_override", "material"), &Self::set_material_override);
 	ClassDB::bind_method(D_METHOD("get_material_override"), &Self::get_material_override);
