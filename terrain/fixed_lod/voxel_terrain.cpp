@@ -60,6 +60,8 @@
 
 namespace zylann::voxel {
 
+uint32_t vector3iKey(Vector3i v);
+
 struct CubicAreaInfo {
 	int edge_size; // In data blocks
 	int mesh_block_size_factor;
@@ -663,6 +665,10 @@ void VoxelTerrain::try_schedule_mesh_update(VoxelMeshBlockVT &mesh_block) {
 		// No viewers want mesh on this block (why even call this function then?)
 		return;
 	}
+
+	uint32_t key = vector3iKey(mesh_block.position);
+	_lightMap.erase(key);
+	_lightProcessed.erase(key);
 
 	const int render_to_data_factor = get_mesh_block_size() / get_data_block_size();
 
@@ -2143,6 +2149,7 @@ class LightBlockTask : public IThreadedTask {
 
     void run(ThreadedTaskContext &ctx) {
         uint32_t blockKey = vector3iKey(blockPos);
+		print_line(vformat("running for %d %d %d", blockPos.x, blockPos.y, blockPos.z));
 
         // only one task can operate on a block at once, this will make the thread sleep until the lock is free
         // TODO: currently crashes
