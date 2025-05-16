@@ -46,6 +46,15 @@ inline RGBLight sample_point_trilinear(int x, int y, int z, std::array<RGBLight,
 // Don't return 255, 255, 255 here, since that has a special significance inside the algorithm and behaves as sunlight
 // 0, 0, 0 means not emissive
 inline RGBLight getEmissiveColor(int typeId) {
+	if (typeId == 27) {
+		return RGBLight{255, 128, 128};
+	}
+	else if (typeId == 28) {
+		return RGBLight{128, 255, 128};
+	}
+	else if (typeId == 29) {
+		return RGBLight{128, 128, 255};
+	}
 	return RGBLight{0, 0, 0};
 }
 
