@@ -1,6 +1,7 @@
 #ifndef RGBLIGHT_H
 #define RGBLIGHT_H
 
+#include "modules/voxel/util/math/vector3f.h"
 #include "util/math/vector3f.h"
 #include <array>
 #include <algorithm>
@@ -30,6 +31,10 @@ struct alignas(1) RGBLight {
         return (max1 > b) ? max1 : b;
     }
 
+	_FORCE_INLINE_ bool is_lucent() {
+		return (r > 0) || (g > 0) || (b > 0);
+	}
+
 	bool operator==(const RGBLight& other) {
 		// TODO: Replace this with default spaceship operator (<=>) once we are on C++20
 		return (r == other.r) && (g == other.g) && (b == other.b) && (range == other.range);
@@ -42,21 +47,6 @@ struct alignas(1) RGBLight {
 };
 
 inline RGBLight sample_point_trilinear(int x, int y, int z, std::array<RGBLight, 20 * 20 * 20> lightData);
-
-// Don't return 255, 255, 255 here, since that has a special significance inside the algorithm and behaves as sunlight
-// 0, 0, 0 means not emissive
-inline RGBLight getEmissiveColor(int typeId) {
-	if (typeId == 27) {
-		return RGBLight{255, 128, 128};
-	}
-	else if (typeId == 28) {
-		return RGBLight{128, 255, 128};
-	}
-	else if (typeId == 29) {
-		return RGBLight{128, 128, 255};
-	}
-	return RGBLight{0, 0, 0};
-}
 
 inline unsigned int index3D(unsigned int x, unsigned int y, unsigned int z, unsigned int size = 18) {
     return (x * size + y) * size + z;
@@ -78,7 +68,6 @@ inline void printLights(RGBLight* lights) {
 
 inline RGBLight sample_lighting_flat(zylann::Vector3f position_world, zylann::Vector3f vertex_position, zylann::Vector3f side_normal, std::array<RGBLight, 20*20*20> lightData, int lightMinimum, bool useShadowTrick, int shadowPenalty) {
     position_world += side_normal;
-    // position_world += zylann::Vector3f(1.0, 1.0, 1.0);
     position_world += zylann::Vector3f(2.0, 2.0, 2.0);
 	float x = position_world.x;
 	float y = position_world.y;
