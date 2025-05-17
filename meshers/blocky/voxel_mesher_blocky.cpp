@@ -375,7 +375,7 @@ void generate_mesh(
 									} else {
 										l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
 									}
-                                    w[i] = Color(float(l.r) / 255., float(l.g) / 255., float(l.b) / 255.);
+									w[i] = Color::from_rgba8(l.r, l.g, l.b);
                                 } else {
                                     w[i] = Color(1.0, 1.0, 1.0);
                                 }
