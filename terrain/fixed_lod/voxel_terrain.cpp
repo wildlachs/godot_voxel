@@ -2063,7 +2063,7 @@ struct LightQueueItem {
 
 struct CompareLight {
     bool operator()(const LightQueueItem& a, const LightQueueItem& b) const {
-        return a.light.maxComponent() < b.light.maxComponent();
+        return a.light.max_component() < b.light.max_component();
     }
 };
 
@@ -2315,21 +2315,11 @@ class LightBlockTask : public IThreadedTask {
             }
         } else { // use startingLight normally
             for (LightQueueItem item: startingLight) {
-                RGBLight originalLight = lightData[index3D(item.x, item.y, item.z)];
+				RGBLight originalLight = lightData[index3D(item.x, item.y, item.z)];
 
-                if (originalLight.r >= item.light.r ||
-                    originalLight.b >= item.light.b ||
-                    originalLight.g >= item.light.g) {
-                    item.light.blendMax(originalLight);
-                } else if (originalLight.r >= item.light.r &&
-                    originalLight.b >= item.light.b &&
-                    originalLight.g >= item.light.g) {
-                    //continue; // no need for a task here
-                    // TODO: disabled task culling for now
-                }
-
-                tasks.push(item);
-                lightData[index3D(item.x, item.y, item.z)] = item.light;
+				item.light.blend_max(originalLight);
+				tasks.push(item);
+				lightData[index3D(item.x, item.y, item.z)] = item.light;
             }
         }
 
@@ -2344,26 +2334,13 @@ class LightBlockTask : public IThreadedTask {
 						ZN_ASSERT_MSG(baked_data.has_model(voxel_id), "No baked data available");
 						const blocky::BakedModel& model = baked_data.models[voxel_id];
 
-						RGBLight emissiveColor = model.light;
+						RGBLight light = lightData[index3D(x, y, z)];
 
-						if (emissiveColor.is_lucent()) {
-                            RGBLight originalLight = lightData[index3D(x, y, z)];
-
-                            if (originalLight.r >= emissiveColor.r ||
-                                originalLight.b >= emissiveColor.b ||
-                                originalLight.g >= emissiveColor.g) {
-                                emissiveColor.blendMax(originalLight);
-                            } else if (originalLight.r >= emissiveColor.r &&
-                                originalLight.b >= emissiveColor.b &&
-                                originalLight.g >= emissiveColor.g) {
-                                //continue; // no need for a task here
-                                // TODO: disabled task culling for now
-                            }
-
-                            LightQueueItem item{emissiveColor, x, y, z};
-                            tasks.push(item);
-                            lightData[index3D(item.x, item.y, item.z)] = item.light;
-                        }
+						if (light.updated_to_max(model.light)) {
+							LightQueueItem item{light, x, y, z};
+							tasks.push(item);
+							lightData[index3D(item.x, item.y, item.z)] = item.light;
+						}
                     }
                 }
             }
@@ -2462,7 +2439,7 @@ class LightBlockTask : public IThreadedTask {
                         }
                     }
 
-                    newLight.blendMax(existingLight);
+                    newLight.blend_max(existingLight);
                     lightData[index3D(testVoxel[0], testVoxel[1], testVoxel[2])] = newLight;
 
                     if (outOfBounds) { // trigger a light update in the adjacent chunk
@@ -2738,14 +2715,13 @@ void VoxelTerrain::process_meshing() {
 
 								RGBLight lightValueAdjacent = adjacentLightData[index3D(voxPos.x, voxPos.y, voxPos.z)];
 								RGBLight lightValueHere = lightData[index3D(transformedVoxPos.x, transformedVoxPos.y, transformedVoxPos.z)];
-								if (lightValueAdjacent.r > 0 && lightValueAdjacent.g > 0 && lightValueAdjacent.b > 0) {
-									// make sure this blends rather than overwriting existing values
-									if (lightValueAdjacent.r > lightValueHere.r || lightValueAdjacent.g > lightValueHere.g || lightValueAdjacent.b > lightValueHere.b) {
-										lightValueHere.blendMax(lightValueAdjacent);
+
+								if (lightValueAdjacent.is_lucent()) {
+									if (lightValueHere.updated_to_max(lightValueAdjacent)) {
 										LightQueueItem item{lightValueHere,
-											static_cast<unsigned>(transformedVoxPos.x),
-											static_cast<unsigned>(transformedVoxPos.y),
-											static_cast<unsigned>(transformedVoxPos.z)
+															static_cast<unsigned>(transformedVoxPos.x),
+															static_cast<unsigned>(transformedVoxPos.y),
+															static_cast<unsigned>(transformedVoxPos.z),
 										};
 										newStartingLight.push_back(item);
 

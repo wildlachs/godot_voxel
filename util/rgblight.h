@@ -20,13 +20,32 @@ struct alignas(1) RGBLight {
         b = (b - amount > minAmount) ? b - amount : minAmount;
     }
 
-    void blendMax(const RGBLight& other) {
-        r = (r > other.r) ? r : other.r;
-        g = (g > other.g) ? g : other.g;
-        b = (b > other.b) ? b : other.b;
-    }
+	_FORCE_INLINE_ bool updated_to_max(const RGBLight& other) {
+		bool updated = false;
 
-    uint8_t maxComponent() const {
+		if (other.r > r) {
+			r = other.r;
+			updated = true;
+		}
+		if (other.g > g) {
+			g = other.g;
+			updated = true;
+		}
+		if (other.b > b) {
+			b = other.b;
+			updated = true;
+		}
+
+		return updated;
+	}
+
+	_FORCE_INLINE_ void blend_max(const RGBLight& other) {
+		r = (r > other.r) ? r : other.r;
+		g = (g > other.g) ? g : other.g;
+		b = (b > other.b) ? b : other.b;
+	}
+
+    _FORCE_INLINE_ uint8_t max_component() const {
         uint8_t max1 = (r > g) ? r : g;
         return (max1 > b) ? max1 : b;
     }
