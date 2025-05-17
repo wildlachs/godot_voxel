@@ -2109,8 +2109,7 @@ std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *li
                 uint32_t newBlockKey = vector3iKey(newBlockPos);
                 RGBLight lightValue = sunlightEnabled ? RGBLight{255, 255, 255} : RGBLight{0, 0, 0};
 				if (lightProcessed->count(newBlockKey)) {
-                    RGBLight* lightArray; // may be unset if light is compressed
-					lightArray = (*lightMap)[newBlockKey];
+                    RGBLight* lightArray = (*lightMap)[newBlockKey];
 					lightValue = lightArray[index3D(nx - 1, ny - 1, nz - 1)]; // -1 accounts for 20x20x20 -> 19x19x19
                 }
 
@@ -2132,6 +2131,7 @@ class LightBlockTask : public IThreadedTask {
     RGBLight* lightData = nullptr;
     std::unordered_map<uint32_t, std::mutex> *pendingBlocks = nullptr;
     std::unordered_map<uint32_t, RGBLight*> *lightMap = nullptr;
+	std::unordered_set<uint32_t> *lightProcessed = nullptr;
     std::optional<Vector3i> originBlock; // which block triggered this update (not set for initial updates)
 
     int mesh_to_data_factor = 0;
@@ -2149,7 +2149,14 @@ class LightBlockTask : public IThreadedTask {
 
     void run(ThreadedTaskContext &ctx) {
         uint32_t blockKey = vector3iKey(blockPos);
-		print_line(vformat("running for %d %d %d", blockPos.x, blockPos.y, blockPos.z));
+
+		Ref<VoxelMesherBlocky> mesher_blocky;
+		ZN_ASSERT_MSG(zylann::godot::try_get_as(_mesher, mesher_blocky), "Expected to find VoxelMesherBlocky");
+
+		Ref<VoxelBlockyLibraryBase> library_ref = mesher_blocky->get_library();
+		ERR_FAIL_COND_MSG(library_ref.is_null(), "VoxelMesherBlocky has no library assigned");
+
+		const blocky::BakedLibrary& baked_data = library_ref->get_baked_data();
 
         // only one task can operate on a block at once, this will make the thread sleep until the lock is free
         // TODO: currently crashes
@@ -2217,6 +2224,7 @@ class LightBlockTask : public IThreadedTask {
 
                 if (compressedVoxelId != AIR_ID) {
                     // nothing to do
+					lightProcessed->insert(vector3iKey(blockPos));
                     return;
                 }
             } else if (voxels.get_channel_compression(channel) != VoxelBuffer::COMPRESSION_NONE) {
@@ -2264,6 +2272,7 @@ class LightBlockTask : public IThreadedTask {
         if (compressedLight) { // entirely bright sunlight flowing down
             // continue the compression, pass the light down to one new task and stop
             if (voxelIsCompressed) {
+				lightProcessed->insert(vector3iKey(blockPos));
                 Vector3i newBlockPos = blockPos + Vector3i(0, -1, 0);
 
                 RGBLight *newLightData = (*lightMap)[vector3iKey(newBlockPos)];
@@ -2274,6 +2283,7 @@ class LightBlockTask : public IThreadedTask {
                 task->lightData = newLightData;
                 task->pendingBlocks = pendingBlocks;
                 task->lightMap = lightMap;
+				task->lightProcessed = lightProcessed;
                 task->originBlock = blockPos;
                 task->mesh_to_data_factor = mesh_to_data_factor;
                 task->_data = _data;
@@ -2331,12 +2341,12 @@ class LightBlockTask : public IThreadedTask {
                         const unsigned int voxel_index = y + x * row_size + z * deck_size;
                         const unsigned int voxel_id = voxelDataType.get()[voxel_index];
 
-                        // hardcoded emissive voxels
-                        // their light value can be any color but NOT sunlight 255/255/255
-                        RGBLight emissiveColor = getEmissiveColor(voxel_id);
-                        if (emissiveColor.r == 0 && emissiveColor.g == 0 && emissiveColor.b == 0) {
-                            // block is not emissive
-                        } else {
+						ZN_ASSERT_MSG(baked_data.has_model(voxel_id), "No baked data available");
+						const blocky::BakedModel& model = baked_data.models[voxel_id];
+
+						RGBLight emissiveColor = model.light;
+
+						if (emissiveColor.is_lucent()) {
                             RGBLight originalLight = lightData[index3D(x, y, z)];
 
                             if (originalLight.r >= emissiveColor.r ||
@@ -2359,6 +2369,7 @@ class LightBlockTask : public IThreadedTask {
             }
         }
 
+		lightProcessed->insert(vector3iKey(blockPos));
         // we want to remesh this block
         (*blocksToRemesh).insert(blockPos);
 
@@ -2540,6 +2551,7 @@ class LightBlockTask : public IThreadedTask {
             task->lightData = newLightData;
             task->pendingBlocks = pendingBlocks;
             task->lightMap = lightMap;
+			task->lightProcessed = lightProcessed;
             task->originBlock = blockPos;
             task->mesh_to_data_factor = mesh_to_data_factor;
             task->_data = _data;
@@ -2648,6 +2660,7 @@ void VoxelTerrain::process_meshing() {
 					task->lightData = lightData;
 					task->pendingBlocks = &pendingBlocks;
 					task->lightMap = &_lightMap;
+					task->lightProcessed = &_lightProcessed;
 					task->mesh_to_data_factor = mesh_to_data_factor;
 					task->_data = _data;
 					task->_mesher = get_mesher();
@@ -2753,6 +2766,7 @@ void VoxelTerrain::process_meshing() {
 						task->lightData = lightData;
 						task->pendingBlocks = &pendingBlocks;
 						task->lightMap = &_lightMap;
+						task->lightProcessed = &_lightProcessed;
 						task->originBlock = blockPos;
 						task->mesh_to_data_factor = mesh_to_data_factor;
 						task->_data = _data;
