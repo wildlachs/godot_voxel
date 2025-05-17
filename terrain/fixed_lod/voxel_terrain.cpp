@@ -2165,11 +2165,9 @@ class LightBlockTask : public IThreadedTask {
         // completely synchronous execution
         std::lock_guard<std::mutex> lock(*tempLock);
 
-        int LIGHT_FALLOFF = lightDecay;
-        int LIGHT_MIN = lightMinimum;
         const int row_size = 18;
 	    const int deck_size = 18 * 18;
-        static const uint16_t AIR_ID = 0;
+        constexpr uint16_t AIR_ID = zylann::voxel::blocky::AIR_ID;
 
         // copy block data into a buffer if we don't already have it cached
         std::shared_ptr<uint16_t> voxelDataType;
@@ -2415,7 +2413,7 @@ class LightBlockTask : public IThreadedTask {
                     // sunlight should never propagate up, ever. important optimisation with no side effects
                     continue;
                 } else {
-                    newLight.dim(LIGHT_FALLOFF, LIGHT_MIN);
+                    newLight.dim(lightDecay, lightMinimum);
                 }
 
                 // any previously calculated light at the test voxel
