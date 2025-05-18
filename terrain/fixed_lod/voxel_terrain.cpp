@@ -2165,8 +2165,8 @@ class LightBlockTask : public IThreadedTask {
         // completely synchronous execution
         std::lock_guard<std::mutex> lock(*tempLock);
 
-        const int row_size = 18;
-	    const int deck_size = 18 * 18;
+        constexpr int ROW_SIZE = 18;
+	    constexpr int DECK_SIZE = 18 * 18;
         constexpr uint16_t AIR_ID = zylann::voxel::blocky::AIR_ID;
 
         // copy block data into a buffer if we don't already have it cached
@@ -2254,7 +2254,7 @@ class LightBlockTask : public IThreadedTask {
                 for (unsigned int x = 0; x <= 17; ++x) {
                     for (unsigned int y = 0; y <= 17; ++y) {
                         for (unsigned int z = 0; z <= 17; ++z) {
-                            const unsigned int voxel_index = y + x * row_size + z * deck_size;
+                            const unsigned int voxel_index = y + x * ROW_SIZE + z * DECK_SIZE;
                             const unsigned int voxel_id = type_buffer[voxel_index];
                             voxelDataTypeNew.get()[voxel_index] = voxel_id;
                         }
@@ -2326,7 +2326,7 @@ class LightBlockTask : public IThreadedTask {
             for (unsigned int x = 1; x < 17; ++x) {
                 for (unsigned int y = 1; y < 17; ++y) {
                     for (unsigned int z = 1; z < 17; ++z) {
-                        const unsigned int voxel_index = y + x * row_size + z * deck_size;
+                        const unsigned int voxel_index = y + x * ROW_SIZE + z * DECK_SIZE;
                         const unsigned int voxel_id = voxelDataType.get()[voxel_index];
 
 						ZN_ASSERT_MSG(baked_data.has_model(voxel_id), "No baked data available");
@@ -2396,7 +2396,7 @@ class LightBlockTask : public IThreadedTask {
 					continue;
 				}
 
-                const unsigned int test_voxel_index = testVoxel[1] + testVoxel[0] * row_size + testVoxel[2] * deck_size;
+                const unsigned int test_voxel_index = testVoxel[1] + testVoxel[0] * ROW_SIZE + testVoxel[2] * DECK_SIZE;
                 const unsigned int test_voxel_id = voxelIsCompressed ? voxelCompressedType : voxelDataType.get()[test_voxel_index];
 
                 if (test_voxel_id != AIR_ID) {
