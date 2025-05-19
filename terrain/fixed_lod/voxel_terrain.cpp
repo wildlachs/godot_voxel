@@ -25,6 +25,7 @@
 #include "../../util/godot/core/string.h"
 #include "../../util/macros.h"
 #include "../../util/math/conv.h"
+#include "../../util/math/vector3i.h"
 #include "../../util/profiling.h"
 #include "../../util/profiling_clock.h"
 #include "../../util/string/format.h"
@@ -59,8 +60,6 @@
 #endif
 
 namespace zylann::voxel {
-
-uint32_t vector3iKey(Vector3i v);
 
 struct CubicAreaInfo {
 	int edge_size; // In data blocks
@@ -666,9 +665,8 @@ void VoxelTerrain::try_schedule_mesh_update(VoxelMeshBlockVT &mesh_block) {
 		return;
 	}
 
-	uint32_t key = vector3iKey(mesh_block.position);
-	_lightMap.erase(key);
-	_lightProcessed.erase(key);
+	_lightMap.erase(mesh_block.position);
+	_lightProcessed.erase(mesh_block.position);
 
 	const int render_to_data_factor = get_mesh_block_size() / get_data_block_size();
 
@@ -2067,14 +2065,8 @@ struct CompareLight {
     }
 };
 
-uint32_t vector3iKey(Vector3i v) {
-    // return 2147483647 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
-    // return 1000000000 + 1000 * 1000 * v.x + 1000 * v.y + v.z;
-    return 1000 * 1000 * (v.x + 1000) + 1000 * (v.y + 1000) + (v.z + 1000);
-}
-
-std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<uint32_t, RGBLight*> *lightMap, std::unordered_set<uint32_t> *lightProcessed, bool sunlightEnabled) {
-    std::array<RGBLight, 20*20*20> result; // needs to be 20x20 for 2-voxel margins on all sides
+std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<Vector3i, RGBLight*> *lightMap, std::unordered_set<Vector3i> *lightProcessed, bool sunlightEnabled) {
+    std::array<RGBLight, 20*20*20> result{}; // needs to be 20x20 for 2-voxel margins on all sides
 
     for (int x = 0; x <= 19; ++x) {
         for (int y = 0; y <= 19; ++y) {
@@ -2106,10 +2098,9 @@ std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *li
                     newBlockPos.z++;
                 }
 
-                uint32_t newBlockKey = vector3iKey(newBlockPos);
                 RGBLight lightValue = sunlightEnabled ? RGBLight{255, 255, 255} : RGBLight{0, 0, 0};
-				if (lightProcessed->count(newBlockKey)) {
-                    RGBLight* lightArray = (*lightMap)[newBlockKey];
+				if (lightProcessed->count(newBlockPos)) {
+                    RGBLight* lightArray = (*lightMap)[newBlockPos];
 					lightValue = lightArray[index3D(nx - 1, ny - 1, nz - 1)]; // -1 accounts for 20x20x20 -> 19x19x19
                 }
 
@@ -2129,9 +2120,9 @@ class LightBlockTask : public IThreadedTask {
     bool compressedLight = false; // represents light coming down from everywhere from (0, 16, 0) to (16, 16, 16)
     Vector3i blockPos;
     RGBLight* lightData = nullptr;
-    std::unordered_map<uint32_t, std::mutex> *pendingBlocks = nullptr;
-    std::unordered_map<uint32_t, RGBLight*> *lightMap = nullptr;
-	std::unordered_set<uint32_t> *lightProcessed = nullptr;
+    std::unordered_map<Vector3i, std::mutex> *pendingBlocks = nullptr;
+    std::unordered_map<Vector3i, RGBLight*> *lightMap = nullptr;
+	std::unordered_set<Vector3i> *lightProcessed = nullptr;
     std::optional<Vector3i> originBlock; // which block triggered this update (not set for initial updates)
 
     int mesh_to_data_factor = 0;
@@ -2142,14 +2133,12 @@ class LightBlockTask : public IThreadedTask {
     std::mutex *tempLock = nullptr;
     std::vector<LightBlockTask*> *secondPassTasks = nullptr;
     std::unordered_set<Vector3i> *blocksToRemesh = nullptr;
-    std::unordered_map<uint32_t, int16_t> *voxelCompressedCache = nullptr;
-    std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> *voxelDataCache = nullptr;
+    std::unordered_map<Vector3i, int16_t> *voxelCompressedCache = nullptr;
+    std::unordered_map<Vector3i, std::shared_ptr<uint16_t>> *voxelDataCache = nullptr;
     int lightDecay = 0;
     int lightMinimum = 0;
 
     void run(ThreadedTaskContext &ctx) {
-        uint32_t blockKey = vector3iKey(blockPos);
-
 		Ref<VoxelMesherBlocky> mesher_blocky;
 		ZN_ASSERT_MSG(zylann::godot::try_get_as(_mesher, mesher_blocky), "Expected to find VoxelMesherBlocky");
 
@@ -2173,10 +2162,10 @@ class LightBlockTask : public IThreadedTask {
         std::shared_ptr<uint16_t> voxelDataType;
         int16_t voxelCompressedType;
         bool voxelIsCompressed = false;
-        if (voxelCompressedCache->find(blockKey) != voxelCompressedCache->end()) {
-            voxelCompressedType = (*voxelCompressedCache)[blockKey];
+        if (voxelCompressedCache->find(blockPos) != voxelCompressedCache->end()) {
+            voxelCompressedType = (*voxelCompressedCache)[blockPos];
             if (voxelCompressedType == -1) {
-                voxelDataType = (*voxelDataCache)[blockKey];
+                voxelDataType = (*voxelDataCache)[blockPos];
             }
             voxelIsCompressed = voxelCompressedType != -1;
         } else {
@@ -2222,7 +2211,7 @@ class LightBlockTask : public IThreadedTask {
 
                 if (compressedVoxelId != AIR_ID) {
                     // nothing to do
-					lightProcessed->insert(vector3iKey(blockPos));
+					lightProcessed->insert(blockPos);
                     return;
                 }
             } else if (voxels.get_channel_compression(channel) != VoxelBuffer::COMPRESSION_NONE) {
@@ -2233,9 +2222,9 @@ class LightBlockTask : public IThreadedTask {
 
             if (voxelIsCompressed) {
                 voxelCompressedType = static_cast<int16_t>(compressedVoxelId);
-                (*voxelCompressedCache)[blockKey] = voxelCompressedType;
+                (*voxelCompressedCache)[blockPos] = voxelCompressedType;
             } else {
-                (*voxelCompressedCache)[blockKey] = -1;
+                (*voxelCompressedCache)[blockPos] = -1;
 
                 Span<const uint8_t> raw_channel;
                 if (!voxels.get_channel_as_bytes_read_only(channel, raw_channel)) {
@@ -2260,7 +2249,7 @@ class LightBlockTask : public IThreadedTask {
                         }
                     }
                 }
-                (*voxelDataCache)[blockKey] = voxelDataTypeNew;
+                (*voxelDataCache)[blockPos] = voxelDataTypeNew;
                 voxelDataType = voxelDataTypeNew;
             }
         }
@@ -2270,10 +2259,10 @@ class LightBlockTask : public IThreadedTask {
         if (compressedLight) { // entirely bright sunlight flowing down
             // continue the compression, pass the light down to one new task and stop
             if (voxelIsCompressed) {
-				lightProcessed->insert(vector3iKey(blockPos));
+				lightProcessed->insert(blockPos);
                 Vector3i newBlockPos = blockPos + Vector3i(0, -1, 0);
 
-                RGBLight *newLightData = (*lightMap)[vector3iKey(newBlockPos)];
+                RGBLight *newLightData = (*lightMap)[newBlockPos];
                 LightBlockTask *task = ZN_NEW(LightBlockTask);
                 // task->startingLight = nullptr;
                 task->compressedLight = true;
@@ -2344,7 +2333,7 @@ class LightBlockTask : public IThreadedTask {
             }
         }
 
-		lightProcessed->insert(vector3iKey(blockPos));
+		lightProcessed->insert(blockPos);
         // we want to remesh this block
         (*blocksToRemesh).insert(blockPos);
 
@@ -2469,9 +2458,8 @@ class LightBlockTask : public IThreadedTask {
 			}
 
             Vector3i newBlockPos = adjacentBlocks[i];
-            uint32_t newBlockKey = vector3iKey(newBlockPos);
 
-            if (pendingBlocks->find(newBlockKey) == pendingBlocks->end() && lightMap->find(newBlockKey) == lightMap->end()) {
+            if (pendingBlocks->find(newBlockPos) == pendingBlocks->end() && lightMap->find(newBlockPos) == lightMap->end()) {
 				continue; // don't update this block if it's neither queued up, nor processed during a previous meshing batch
 			}
 
@@ -2518,7 +2506,7 @@ class LightBlockTask : public IThreadedTask {
                 }
             }
 
-            RGBLight *newLightData = (*lightMap)[newBlockKey];
+            RGBLight *newLightData = (*lightMap)[newBlockPos];
             LightBlockTask *task = ZN_NEW(LightBlockTask);
             task->startingLight = newStartingLight;
             task->compressedLight = false;
@@ -2575,19 +2563,16 @@ void VoxelTerrain::process_meshing() {
 
 		std::unordered_set<Vector3i> blocksToRemesh;
 
-		// index these with vector3iKey(Vector3i)
-		std::unordered_map<uint32_t, std::mutex> pendingBlocks;
-		std::unordered_map<uint32_t, std::mutex> firstPassMutex;
-		std::unordered_map<uint32_t, std::condition_variable> firstPassCV;
-		std::unordered_map<uint32_t, bool> firstPassBool;
-		std::unordered_map<uint32_t, std::shared_ptr<uint16_t>> voxelDataCache;
-		std::unordered_map<uint32_t, int16_t> voxelCompressedCache;
+		std::unordered_map<Vector3i, std::mutex> pendingBlocks;
+		std::unordered_map<Vector3i, std::mutex> firstPassMutex;
+		std::unordered_map<Vector3i, std::condition_variable> firstPassCV;
+		std::unordered_map<Vector3i, std::shared_ptr<uint16_t>> voxelDataCache;
+		std::unordered_map<Vector3i, int16_t> voxelCompressedCache;
 		if (_blocks_pending_update.size() > 0) {
 			// keep track of which blocks are pending
 			for (size_t bi = 0; bi < _blocks_pending_update.size(); ++bi) {
 				const Vector3i mesh_block_pos = _blocks_pending_update[bi];
-				uint32_t key = vector3iKey(mesh_block_pos);
-				if (_lightProcessed.count(key)) {
+				if (_lightProcessed.count(mesh_block_pos)) {
 					// we already processed this block, don't do it again
 					continue;
 				}
@@ -2597,11 +2582,9 @@ void VoxelTerrain::process_meshing() {
 			}
 
 			for (Vector3i blockPos: firstPassBlocks) {
-				uint32_t key = vector3iKey(blockPos);
-				pendingBlocks.try_emplace(key);
-				firstPassMutex.try_emplace(key);
-				firstPassCV.try_emplace(key);
-				firstPassBool.try_emplace(false);
+				pendingBlocks.try_emplace(blockPos);
+				firstPassMutex.try_emplace(blockPos);
+				firstPassCV.try_emplace(blockPos);
 			}
 
 			std::mutex tempLock; // make the threads entirely synchronous
@@ -2609,15 +2592,13 @@ void VoxelTerrain::process_meshing() {
 
 			// process light for each block
 			for (Vector3i blockPos: firstPassBlocks) {
-				uint32_t key = vector3iKey(blockPos);
-
 				bool compressedLight = false;
 				std::vector<LightQueueItem> startingLight;
 				if (_sunlight_enabled && blockPos.y >= _sunlight_y_level) {
 					compressedLight = true; // top starts off with sunlight
 				}
 
-				if (_lightMap.find(key) == _lightMap.end()) {
+				if (_lightMap.find(blockPos) == _lightMap.end()) {
 					// initialise light data for that block, if it doesn't exist
 					RGBLight *lightData = new RGBLight[18 * 18 * 18];
 					for (int i = 0; i < 18; i++) {
@@ -2627,7 +2608,7 @@ void VoxelTerrain::process_meshing() {
 							}
 						}
 					}
-					_lightMap[key] = lightData;
+					_lightMap[blockPos] = lightData;
 
 					LightBlockTask *task = ZN_NEW(LightBlockTask);
 					task->compressedLight = compressedLight;
@@ -2680,8 +2661,7 @@ void VoxelTerrain::process_meshing() {
 				Vector3i(16, 16, 1),
 			};
 			for (Vector3i blockPos: firstPassBlocks) {
-				uint32_t blockKey = vector3iKey(blockPos);
-				RGBLight* lightData = _lightMap[blockKey];
+				RGBLight* lightData = _lightMap[blockPos];
 
 				for (int d = 0; d < 6; ++d) {
 					Vector3i newBlockPos = blockPos + adjacentBlockOffset[d];
@@ -2689,21 +2669,18 @@ void VoxelTerrain::process_meshing() {
 					Vector3i max = maxs[d];
 					Vector3i voxOffset = 16 * adjacentBlockOffset[d];
 
-					uint32_t newBlockKey = vector3iKey(newBlockPos);
-
-					if (pendingBlocks.find(newBlockKey) != pendingBlocks.end()) {
+					if (pendingBlocks.find(newBlockPos) != pendingBlocks.end()) {
 						continue; // don't trigger an update if we already processed this block in the first pass
 					}
 
-					if (_lightProcessed.count(newBlockKey) == 0) {
+					if (_lightProcessed.count(newBlockPos) == 0) {
 						continue; // don't trigger an update if the adjacent block has no light data
 					}
 
 					// initialise starting light values for the new task
 					std::vector<LightQueueItem> newStartingLight;
 
-					RGBLight* adjacentLightData; // may be unset if light is compressed
-					adjacentLightData = _lightMap[newBlockKey];
+					RGBLight* adjacentLightData = _lightMap[newBlockPos];
 
 					for (int x = min.x; x <= max.x; ++x) {
 						for (int y = min.y; y <= max.y; ++y) {
@@ -2825,10 +2802,9 @@ void VoxelTerrain::process_meshing() {
         if (performLighting) {
             task->lightMinimum = _light_minimum;
 
-            uint32_t key = vector3iKey(mesh_block_pos);
-			ZN_ASSERT(_lightMap.find(key) != _lightMap.end());
+			ZN_ASSERT(_lightMap.find(mesh_block_pos) != _lightMap.end());
 
-			std::array<RGBLight, 20*20*20> lightDataArray = fixLightCubeSides(mesh_block_pos, _lightMap[key], &_lightMap, &_lightProcessed, _sunlight_enabled); // add extra data for adjacent blocks
+			std::array<RGBLight, 20*20*20> lightDataArray = fixLightCubeSides(mesh_block_pos, _lightMap[mesh_block_pos], &_lightMap, &_lightProcessed, _sunlight_enabled); // add extra data for adjacent blocks
 			task->lightData = lightDataArray;
         }
 
