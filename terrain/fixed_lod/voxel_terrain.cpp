@@ -2600,14 +2600,7 @@ void VoxelTerrain::process_meshing() {
 
 				if (_lightMap.find(blockPos) == _lightMap.end()) {
 					// initialise light data for that block, if it doesn't exist
-					RGBLight *lightData = new RGBLight[18 * 18 * 18];
-					for (int i = 0; i < 18; i++) {
-						for (int j = 0; j < 18; j++) {
-							for (int k = 0; k < 18; k++) {
-								lightData[index3D(i, j, k)] = RGBLight{0, 0, 0};
-							}
-						}
-					}
+					RGBLight *lightData = new RGBLight[18 * 18 * 18]{};
 					_lightMap[blockPos] = lightData;
 
 					LightBlockTask *task = ZN_NEW(LightBlockTask);
