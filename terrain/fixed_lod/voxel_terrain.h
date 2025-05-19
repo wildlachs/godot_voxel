@@ -47,8 +47,8 @@ public:
 	VoxelTerrain();
 	~VoxelTerrain();
 
-    std::unordered_map<uint32_t, RGBLight*> _lightMap;
-	std::unordered_set<uint32_t> _lightProcessed;
+    std::unordered_map<Vector3i, RGBLight*> _lightMap;
+	std::unordered_set<Vector3i> _lightProcessed;
 
     bool _lighting_enabled = true;
     void set_lighting_enabled(bool enabled);
