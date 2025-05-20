@@ -44,12 +44,12 @@ void generate_mesh(
 		const bool bake_occlusion,
 		const float baked_occlusion_darkness,
 		const TintSampler tint_sampler,
-        const bool lightingEnabled,
-        const std::array<RGBLight, 20*20*20> &lightData,
-        const int lightMinimum,
-        const bool _shadow_sampling_trick,
-        const int _shadow_sampling_trick_penalty,
-        const bool _smooth_lighting
+        const bool lighting_enabled,
+        const std::array<RGBLight, 20*20*20> &light_data,
+        const int light_minimum,
+        const bool shadow_sampling_trick,
+        const int shadow_sampling_trick_penalty,
+        const bool smooth_lighting
 ) {
 	// TODO Optimization: not sure if this mandates a template function. There is so much more happening in this
 	// function other than reading voxels, although reading is on the hottest path. It needs to be profiled. If
@@ -363,17 +363,17 @@ void generate_mesh(
                                     }
                                 }
 
-                                if (lightingEnabled) {
+                                if (lighting_enabled) {
                                     Vector3f side_normal = to_vec3f(Cube::g_side_normals[side]);
 
                                     // pos - position of voxel
                                     // vertex_pos - position of vertex (0 to 1)
                                     // side_normal - normal vector
-                                    RGBLight l;
-									if (_smooth_lighting) {
-										l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+                                    RGBLight l{0, 0, 0, 0};
+									if (smooth_lighting) {
+										l = sample_lighting(pos, vertex_pos, side_normal, light_data, light_minimum, shadow_sampling_trick, shadow_sampling_trick_penalty);
 									} else {
-										l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+										l = sample_lighting_flat(pos, vertex_pos, side_normal, light_data, light_minimum, shadow_sampling_trick, shadow_sampling_trick_penalty);
 									}
 									w[i] = Color::from_rgba8(l.r, l.g, l.b);
                                 } else {
@@ -465,20 +465,20 @@ void generate_mesh(
 						arrays.positions.push_back(positions[i] + pos);
 
                         Color c{1.0, 1.0, 1.0};
-                        if (lightingEnabled) {
+                        if (lighting_enabled) {
                             Vector3f side_normal = normals[i];
                             Vector3f vertex_pos = positions[i];
 
                             // pos - position of voxel
                             // vertex_pos - position of vertex (0 to 1)
                             // side_normal - normal vector
-                            RGBLight l;
-							if (_smooth_lighting) {
-								l = sample_lighting(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+                            RGBLight l{0, 0, 0, 0};
+							if (smooth_lighting) {
+								l = sample_lighting(pos, vertex_pos, side_normal, light_data, light_minimum, shadow_sampling_trick, shadow_sampling_trick_penalty);
 							} else {
-								l = sample_lighting_flat(pos, vertex_pos, side_normal, lightData, lightMinimum, _shadow_sampling_trick, _shadow_sampling_trick_penalty);
+								l = sample_lighting_flat(pos, vertex_pos, side_normal, light_data, light_minimum, shadow_sampling_trick, shadow_sampling_trick_penalty);
 							}
-                            c = Color(float(l.r) / 255., float(l.g) / 255., float(l.b) / 255.);
+							c = Color::from_rgba8(l.r, l.g, l.b);
                         } else {
                             c = Color(1.0, 1.0, 1.0);
                         }
