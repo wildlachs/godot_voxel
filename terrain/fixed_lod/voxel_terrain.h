@@ -56,18 +56,6 @@ public:
         return _lighting_enabled;
     }
 
-    bool _sunlight_enabled = true;
-    void set_sunlight_enabled(bool enabled);
-    bool get_sunlight_enabled() const {
-        return _sunlight_enabled;
-    }
-
-    int _sunlight_y_level = 2;
-    void set_sunlight_y_level(int value);
-    int get_sunlight_y_level() const {
-        return _sunlight_y_level;
-    }
-
     int _light_decay = 16;
     void set_light_decay(int decay);
     int get_light_decay() const {

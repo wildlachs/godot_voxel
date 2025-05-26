@@ -2062,7 +2062,7 @@ struct CompareLight {
     }
 };
 
-std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<Vector3i, RGBLight*> *lightMap, std::unordered_set<Vector3i> *lightProcessed, bool sunlightEnabled) {
+std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *lightData, std::unordered_map<Vector3i, RGBLight*> *lightMap, std::unordered_set<Vector3i> *lightProcessed) {
     std::array<RGBLight, 20*20*20> result{}; // needs to be 20x20 for 2-voxel margins on all sides
 
     for (int x = 0; x < 20; ++x) {
@@ -2095,7 +2095,7 @@ std::array<RGBLight, 20*20*20> fixLightCubeSides(Vector3i blockPos, RGBLight *li
                     newBlockPos.z++;
                 }
 
-                RGBLight lightValue = sunlightEnabled ? RGBLight{255, 255, 255} : RGBLight{0, 0, 0};
+                RGBLight lightValue = RGBLight{0, 0, 0};
 				if (lightProcessed->count(newBlockPos)) {
                     RGBLight* lightArray = (*lightMap)[newBlockPos];
 					lightValue = lightArray[index3D(nx - 1, ny - 1, nz - 1)]; // -1 accounts for 20x20x20 -> 19x19x19
@@ -2114,7 +2114,6 @@ class LightBlockTask : public IThreadedTask {
     public:
 
     std::vector<LightQueueItem> starting_light;
-    bool compressed_light = false; // represents light coming down from everywhere from (0, 16, 0) to (16, 16, 16)
     Vector3i block_pos;
     RGBLight* light_data = nullptr;
     std::unordered_map<Vector3i, std::mutex> *pending_blocks = nullptr;
@@ -2253,59 +2252,13 @@ class LightBlockTask : public IThreadedTask {
 
         // make queue of subtasks for the flood fill algorithm
         std::priority_queue<LightQueueItem, std::vector<LightQueueItem>, CompareLight> tasks;
-        if (compressed_light) { // entirely bright sunlight flowing down
-            // continue the compression, pass the light down to one new task and stop
-            if (voxel_is_compressed) {
-				light_processed->insert(block_pos);
-                Vector3i newBlockPos = block_pos + Vector3i(0, -1, 0);
+		for (LightQueueItem item: starting_light) {
+			RGBLight original_light = light_data[index3D(item.x, item.y, item.z)];
 
-                RGBLight *newLightData = (*light_map)[newBlockPos];
-                LightBlockTask *task = ZN_NEW(LightBlockTask);
-                // task->startingLight = nullptr;
-                task->compressed_light = true;
-                task->block_pos = newBlockPos;
-                task->light_data = newLightData;
-                task->pending_blocks = pending_blocks;
-                task->light_map = light_map;
-				task->light_processed = light_processed;
-                task->origin_block = block_pos;
-                task->mesh_to_data_factor = mesh_to_data_factor;
-                task->_data = _data;
-                task->_mesher = _mesher;
-                task->_generator = _generator;
-                task->temp_lock = temp_lock;
-                task->blocks_to_remesh = blocks_to_remesh;
-                task->light_decay = light_decay;
-                task->light_minimum = light_minimum;
-                task->voxel_data_cache = voxel_data_cache;
-                task->voxel_compressed_cache = voxel_compressed_cache;
-
-                if (origin_block) {
-                    VoxelEngine::get_singleton().push_async_task(task);
-                } else {
-                    second_pass_tasks->push_back(task);
-                }
-                return;
-            } else {
-            // expand the sunlight into tasks
-                RGBLight sunlight{255, 255, 255};
-                for (unsigned int i = 1; i <= 16; ++i) {
-                    for (unsigned int j = 1; j <= 16; ++j) {
-                        LightQueueItem item{sunlight, i, 16, j};
-                        tasks.push(item);
-                        light_data[index3D(item.x, item.y, item.z)] = item.light;
-                    }
-                }
-            }
-        } else { // use startingLight normally
-            for (LightQueueItem item: starting_light) {
-				RGBLight originalLight = light_data[index3D(item.x, item.y, item.z)];
-
-				item.light.blend_max(originalLight);
-				tasks.push(item);
-				light_data[index3D(item.x, item.y, item.z)] = item.light;
-            }
-        }
+			item.light.blend_max(original_light);
+			tasks.push(item);
+			light_data[index3D(item.x, item.y, item.z)] = item.light;
+		}
 
         // add any other light sources (emissive blocks)
         if (!voxel_is_compressed) {
@@ -2384,15 +2337,7 @@ class LightBlockTask : public IThreadedTask {
                 }
 
                 RGBLight new_light = task.light;
-                bool is_maximum = new_light.r == 255 && new_light.g == 255 && new_light.b == 255;
-                if (dir == 2 && is_maximum) {
-                    // special case, sunlight propagates straight down without attenuation
-                } else if (dir == 3 && is_maximum) {
-                    // sunlight should never propagate up, ever. important optimisation with no side effects
-                    continue;
-                } else {
-                    new_light.dim(light_decay, light_minimum);
-                }
+				new_light.dim(light_decay, light_minimum);
 
                 // any previously calculated light at the test voxel
                 RGBLight existing_light = light_data[index3D(test_voxel[0], test_voxel[1], test_voxel[2])];
@@ -2503,7 +2448,6 @@ class LightBlockTask : public IThreadedTask {
             RGBLight *new_light_data = (*light_map)[new_block_pos];
             LightBlockTask *task = ZN_NEW(LightBlockTask);
             task->starting_light = new_starting_light;
-            task->compressed_light = false;
             task->block_pos = new_block_pos;
             task->light_data = new_light_data;
             task->pending_blocks = pending_blocks;
@@ -2575,18 +2519,18 @@ void VoxelTerrain::process_meshing() {
 
 			// process light for each block
 			for (Vector3i block_pos: first_pass_blocks) {
-				bool compressed_light = false;
 				std::vector<LightQueueItem> starting_light;
-				if (_sunlight_enabled && block_pos.y >= _sunlight_y_level) {
-					compressed_light = true; // top starts off with sunlight
-				}
 
 				// initialise light data for that block, if it doesn't exist
-				RGBLight *light_data = new RGBLight[18 * 18 * 18]{};
-				_light_map[block_pos] = light_data;
+				RGBLight *light_data;
+				if (_light_map.count(block_pos)) {
+					light_data = _light_map[block_pos];
+				} else {
+					light_data = new RGBLight[18 * 18 * 18]{};
+					_light_map[block_pos] = light_data;
+				}
 
 				LightBlockTask *task = ZN_NEW(LightBlockTask);
-				task->compressed_light = compressed_light;
 				task->block_pos = block_pos;
 				task->light_data = light_data;
 				task->pending_blocks = &pending_blocks;
@@ -2686,7 +2630,6 @@ void VoxelTerrain::process_meshing() {
 					if (new_starting_light.size() > 0) {
 						LightBlockTask *task = ZN_NEW(LightBlockTask);
 						task->starting_light = new_starting_light;
-						task->compressed_light = false;
 						task->block_pos = block_pos;
 						task->light_data = light_data;
 						task->pending_blocks = &pending_blocks;
@@ -2778,7 +2721,7 @@ void VoxelTerrain::process_meshing() {
 
 			ZN_ASSERT(_light_map.find(mesh_block_pos) != _light_map.end());
 
-			std::array<RGBLight, 20*20*20> lightDataArray = fixLightCubeSides(mesh_block_pos, _light_map[mesh_block_pos], &_light_map, &_light_processed, _sunlight_enabled); // add extra data for adjacent blocks
+			std::array<RGBLight, 20*20*20> lightDataArray = fixLightCubeSides(mesh_block_pos, _light_map[mesh_block_pos], &_light_map, &_light_processed); // add extra data for adjacent blocks
 			task->lightData = lightDataArray;
         }
 
@@ -2829,14 +2772,6 @@ void VoxelTerrain::process_meshing() {
 
 void VoxelTerrain::set_lighting_enabled(bool enabled) {
 	_lighting_enabled = enabled;
-}
-
-void VoxelTerrain::set_sunlight_enabled(bool enabled) {
-	_sunlight_enabled = enabled;
-}
-
-void VoxelTerrain::set_sunlight_y_level(int value) {
-	_sunlight_y_level = value;
 }
 
 void VoxelTerrain::set_light_decay(int decay) {
@@ -3306,12 +3241,6 @@ void VoxelTerrain::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_lighting_enabled", "enabled"), &Self::set_lighting_enabled);
 	ClassDB::bind_method(D_METHOD("get_lighting_enabled"), &Self::get_lighting_enabled);
 
-	ClassDB::bind_method(D_METHOD("set_sunlight_enabled", "enabled"), &Self::set_sunlight_enabled);
-	ClassDB::bind_method(D_METHOD("get_sunlight_enabled"), &Self::get_sunlight_enabled);
-
-	ClassDB::bind_method(D_METHOD("set_sunlight_y_level", "value"), &Self::set_sunlight_y_level);
-	ClassDB::bind_method(D_METHOD("get_sunlight_y_level"), &Self::get_sunlight_y_level);
-
 	ClassDB::bind_method(D_METHOD("set_light_decay", "decay"), &Self::set_light_decay);
 	ClassDB::bind_method(D_METHOD("get_light_decay"), &Self::get_light_decay);
 
@@ -3403,8 +3332,6 @@ void VoxelTerrain::_bind_methods() {
 	ADD_GROUP("Flood Fill Lighting", "");
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_enabled"), "set_lighting_enabled", "get_lighting_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sunlight_enabled"), "set_sunlight_enabled", "get_sunlight_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "sunlight_y_level"), "set_sunlight_y_level", "get_sunlight_y_level");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "light_decay"), "set_light_decay", "get_light_decay");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "light_minimum"), "set_light_minimum", "get_light_minimum");
 
