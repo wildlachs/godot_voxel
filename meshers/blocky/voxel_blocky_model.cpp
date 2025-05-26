@@ -156,18 +156,19 @@ void VoxelBlockyModel::set_light_color(Color color) {
 	RGBLight light{static_cast<uint8_t>(color.get_r8()),
 				   static_cast<uint8_t>(color.get_g8()),
 				   static_cast<uint8_t>(color.get_b8()),
-				   _light.range};
+				   _light.data};
 	if (light != _light) {
 		_light = light;
+		_light.set_source();
 		emit_changed();
 	}
 }
 
 void VoxelBlockyModel::set_light_range(int range) {
-	RGBLight light{_light.r, _light.g, _light.b,
-				   static_cast<uint8_t>(math::clamp(range, 0, 15))};
-	if (light != _light) {
-		_light = light;
+	ZN_ASSERT_MSG(range >= 0 && range < 16, "Range values must be from 0 to 15.");
+
+	if (_light.get_range() != range) {
+		_light.set_range(range);
 		emit_changed();
 	}
 }

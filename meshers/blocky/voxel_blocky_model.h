@@ -58,8 +58,8 @@ public:
 	}
 
 	void set_light_range(int range);
-	int get_light_range() const {
-		return _light.range;
+	int get_light_range() {
+		return _light.get_range();
 	}
 
 	void set_material_override(int index, Ref<Material> material);

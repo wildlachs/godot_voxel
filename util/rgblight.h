@@ -18,11 +18,17 @@ enum class Direction {
 	BACK = 5,
 };
 
+constexpr uint8_t IS_SOURCE_FLAG = 0b10000000;
+constexpr uint8_t UNUSED_FLAG_1    = 0b01000000;
+constexpr uint8_t UNUSED_FLAG_2    = 0b00100000;
+constexpr uint8_t UNUSED_FLAG_3    = 0b00010000;
+constexpr uint8_t RANGE_MASK       = 0b00001111;
+
 struct alignas(1) RGBLight {
 	uint8_t r = 0;
 	uint8_t g = 0;
 	uint8_t b = 0;
-	uint8_t range = 0;
+	uint8_t data = 0;
 
 	void dim(uint8_t amount, uint8_t minAmount) {
 		r = (r - amount > minAmount) ? r - amount : minAmount;
@@ -64,14 +70,33 @@ struct alignas(1) RGBLight {
 		return (r > 0) || (g > 0) || (b > 0);
 	}
 
+	_FORCE_INLINE_ bool is_dark() {
+		return !is_lucent();
+	}
+
+	_FORCE_INLINE_ bool is_source() {
+		return data & IS_SOURCE_FLAG;
+	}
+
+	_FORCE_INLINE_ void set_source() {
+		data |= IS_SOURCE_FLAG;
+	}
+
+	_FORCE_INLINE_ uint8_t get_range() {
+		return data & RANGE_MASK;
+	}
+
+	_FORCE_INLINE_ void set_range(uint8_t range) {
+		uint8_t flags = data & (~RANGE_MASK);
+		data = flags & (range & RANGE_MASK);
+	}
+
 	bool operator==(const RGBLight &other) {
-		// TODO: Replace this with default spaceship operator (<=>) once we are on C++20
-		return (r == other.r) && (g == other.g) && (b == other.b) && (range == other.range);
+		return (r == other.r) && (g == other.g) && (b == other.b);
 	}
 
 	bool operator!=(const RGBLight &other) {
-		// TODO: Replace this with default spaceship operator (<=>) once we are on C++20
-		return (r != other.r) || (g != other.g) || (b != other.b) || (range != other.range);
+		return (r != other.r) || (g != other.g) || (b != other.b);
 	}
 };
 
