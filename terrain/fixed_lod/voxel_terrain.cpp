@@ -2278,7 +2278,7 @@ class LightBlockTask : public IThreadedTask {
 
 						RGBLight light = light_data[index3D(x, y, z)];
 
-						if (light.updated_to_max(model.light)) {
+						if (light.is_source() || light.updated_to_max(model.light)) {
 							LightQueueItem item{light, x, y, z};
 							tasks.push(item);
 							light_data[index3D(item.x, item.y, item.z)] = item.light;
