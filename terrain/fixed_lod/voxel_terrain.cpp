@@ -2303,6 +2303,9 @@ class LightBlockTask : public IThreadedTask {
                 continue;
             }
 
+			std::array<Direction, 6> directions = {Direction::LEFT, Direction::RIGHT, Direction::DOWN,
+												   Direction::UP, Direction::FRONT, Direction::BACK};
+
             // try to propagate light to neighbours
             unsigned int test_voxels[6][3] = {
                 {task.x - 1, task.y, task.z},
@@ -2312,8 +2315,8 @@ class LightBlockTask : public IThreadedTask {
                 {task.x, task.y, task.z - 1},
                 {task.x, task.y, task.z + 1},
             };
-            for (int dir = 0; dir < 6; ++dir) {
-                unsigned int *test_voxel = test_voxels[dir];
+			for (const Direction& dir : directions) {
+                unsigned int *test_voxel = test_voxels[static_cast<int>(dir)];
 
                 // check if we're totally outside of the array and continue if so
                 bool out_of_array = false;
@@ -2364,7 +2367,7 @@ class LightBlockTask : public IThreadedTask {
                     light_data[index3D(test_voxel[0], test_voxel[1], test_voxel[2])] = new_light;
 
                     if (out_of_bounds) { // trigger a light update in the adjacent chunk
-                        updated_directions[dir] = true;
+                        updated_directions[static_cast<int>(dir)] = true;
 
                         // keep propagating to get edges/corners
                         LightQueueItem new_task{new_light, test_voxel[0], test_voxel[1], test_voxel[2]};

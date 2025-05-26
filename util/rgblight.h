@@ -8,6 +8,16 @@
 #include <cstdint>
 #include <cstdio>
 
+// Used as indices in loops and arrays, don't change these values!
+enum class Direction {
+	LEFT = 0,
+	RIGHT = 1,
+	DOWN = 2,
+	UP = 3,
+	FRONT = 4,
+	BACK = 5,
+};
+
 struct alignas(1) RGBLight {
     uint8_t r = 0;
     uint8_t g = 0;
