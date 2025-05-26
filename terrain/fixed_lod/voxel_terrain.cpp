@@ -2170,9 +2170,14 @@ class LightBlockTask : public IThreadedTask {
             const Box3i data_box = Box3i(block_pos * mesh_to_data_factor, Vector3iUtil::create(mesh_to_data_factor)).padded(1);
             bool dataSuccess = _data->get_blocks_with_voxel_data(data_box, 0, to_span(blocks));
 
-            if (!dataSuccess) {
-                return; // try to avoid crashing
-            }
+			int counter = 0;
+			while (!dataSuccess) {
+				Thread::sleep_usec(2000);
+				dataSuccess = _data->get_blocks_with_voxel_data(data_box, 0, to_span(blocks));
+				if (++counter == 5) {
+					return; // drop block
+				}
+			}
 
             uint64_t blocks_count = Vector3iUtil::get_volume_u64(data_box.size);
 
