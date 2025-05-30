@@ -2293,9 +2293,9 @@ class LightBlockTask : public IThreadedTask {
 
         // perform flood fill algorithm
         int iterations = 0;
-        const int iterationsLimit = 2 * 20 * 20 * 20;
+        constexpr int ITERATIONS_LIMIT = 5 * 20 * 20 * 20;
 		for (; !tasks.empty(); tasks.pop()) {
-            if (++iterations >= iterationsLimit) {
+            if (++iterations >= ITERATIONS_LIMIT) {
                 break;
             }
 
